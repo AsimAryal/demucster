@@ -1,0 +1,50 @@
+# =============================================================================
+# Demucster — docker compose (production)
+# =============================================================================
+# Requires: NVIDIA Container Toolkit (nvidia-ctk)
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#
+# Usage:
+#   docker compose up --build        # Build and start
+#   docker compose up -d             # Detached
+#   docker compose logs -f demucster # Follow logs
+# =============================================================================
+
+services:
+  demucster:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: demucster
+    ports:
+      - "8000:8000"
+    volumes:
+      - demucster-data:/data
+      # Optional: mount a local model cache to avoid re-downloading
+      # - ~/.cache/torch:/home/demucster/.cache/torch
+    environment:
+      - DEFAULT_MODEL=htdemucs_ft
+      - MAX_CONCURRENT_JOBS=2
+      - RETENTION_HOURS=24
+      - OUTPUT_FORMAT=mp3
+      - MP3_BITRATE=320
+      - LOG_LEVEL=INFO
+      - PREWARM_MODEL=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s  # Model warmup can take a while
+
+volumes:
+  demucster-data:
+    driver: local

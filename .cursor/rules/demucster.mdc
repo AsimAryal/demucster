@@ -1,0 +1,60 @@
+---
+description: Demucster project conventions and architecture rules
+globs: ["src/**/*.py", "tests/**/*.py"]
+alwaysApply: true
+---
+
+# Demucster — Cursor Rules
+
+## Project
+
+Demucster is a GPU-accelerated audio stem separation microservice (FastAPI + PyTorch + Demucs) targeting NVIDIA DGX Spark (GB10 Blackwell, 128 GB unified memory).
+
+## Tech Stack
+
+- Python 3.11+, FastAPI, Pydantic v2, PyTorch ≥ 2.7, CUDA ≥ 12.8
+- Package manager: `uv` (never raw pip)
+- Linter/formatter: `ruff` (config in pyproject.toml, line-length 100)
+- Build: hatchling, src/ layout (`src/demucster/`)
+- Tests: pytest + pytest-asyncio
+
+## Code Rules
+
+1. **Pydantic BaseModel only** — never use dataclasses for data models.
+2. **Full type annotations** on all function signatures and return types.
+3. **Docstrings** on all public classes and functions.
+4. **Lazy imports** for heavy deps (demucs, yt_dlp) — import inside functions.
+5. **ruff check + ruff format** before every commit.
+
+## GPU / Blackwell Rules
+
+- Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (already in gpu.py + Dockerfile).
+- NEVER set `CUDA_MANAGED_FORCE_DEVICE_ALLOC`.
+- Use `torch.cuda` APIs for GPU info, NOT `pynvml` or `nvidia-smi` (NVML misreports on GB10).
+- Catch `torch.cuda.OutOfMemoryError` per-job, call `empty_cache()`, mark FAILED, continue queue.
+
+## Architecture
+
+- `core/config.py` → `Settings` (Pydantic BaseSettings), `get_settings()` with `lru_cache`
+- `worker/queue.py` → `JobQueue` (asyncio.Queue + Semaphore), `JobRecord` (Pydantic)
+- `services/separator.py` → `DemucsService`, `SUPPORTED_MODELS`
+- `main.py` → `create_app()`, lifespan, module-level `job_queue` / `demucs_service`
+- Inference in `run_in_executor` → keeps event loop responsive
+- Progress: thread→async bridge via `asyncio.run_coroutine_threadsafe`
+
+## Testing
+
+- All tests mock Demucs, torch.cuda, and torchaudio — no GPU needed.
+- Clear `get_settings.cache_clear()` in test fixtures.
+- Use `TestClient` for API tests, `pytest-asyncio` for queue tests.
+
+## Commands
+
+```bash
+uv sync                              # Install deps
+uv run uvicorn demucster.main:app --reload  # Dev server
+uv run pytest tests/ -v              # Run tests
+uv run ruff check --fix src/ tests/  # Lint
+uv run ruff format src/ tests/       # Format
+docker compose up --build            # Deploy
+```
