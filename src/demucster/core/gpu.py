@@ -27,21 +27,29 @@ logger = logging.getLogger(__name__)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
-def get_device(preferred: str = "cuda") -> torch.device:
-    """Return a ``torch.device``, falling back to CPU when CUDA is unavailable.
+def get_device(preferred: str = "cuda", *, require_cuda: bool = False) -> torch.device:
+    """Resolve a configured PyTorch device.
 
     Parameters
     ----------
     preferred:
-        Device string requested by the user / config (``"cuda"`` or ``"cpu"``).
+        Device string requested by the user / config.
+    require_cuda:
+        Raise when a CUDA device was requested but is unavailable.
 
     Returns
     -------
     torch.device
         The resolved device.
     """
-    if preferred == "cuda" and torch.cuda.is_available():
-        dev = torch.device("cuda", 0)
+    if preferred.startswith("cuda") and torch.cuda.is_available():
+        dev = torch.device(preferred)
+        index = dev.index if dev.index is not None else 0
+        device_count = torch.cuda.device_count()
+        if index >= device_count:
+            raise RuntimeError(
+                f"CUDA device index {index} is unavailable; found {device_count} device(s)"
+            )
         name = torch.cuda.get_device_name(dev)
         cap = torch.cuda.get_device_capability(dev)
         logger.info(
@@ -51,7 +59,9 @@ def get_device(preferred: str = "cuda") -> torch.device:
         )
         return dev
 
-    if preferred == "cuda":
+    if preferred.startswith("cuda") and require_cuda:
+        raise RuntimeError("CUDA was requested and REQUIRE_CUDA=true, but CUDA is unavailable")
+    if preferred.startswith("cuda"):
         logger.warning("CUDA requested but unavailable — falling back to CPU")
     return torch.device("cpu")
 

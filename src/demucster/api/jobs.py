@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
-import io
 import logging
+import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
+from pydantic import ValidationError
+from starlette.background import BackgroundTask
 
 from demucster.core.config import get_settings
-from demucster.models.schemas import JobResponse, JobStatus, URLRequest
+from demucster.models.schemas import (
+    JobResponse,
+    JobStatus,
+    SeparationOptions,
+    URLRequest,
+)
 from demucster.services.audio import ALLOWED_EXTENSIONS, InvalidAudioError, validate_audio_file
-from demucster.worker.queue import JobRecord
+from demucster.worker.queue import JobProcessingError, JobQueue, JobRecord
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +33,8 @@ router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _queue():
+
+def _queue() -> JobQueue:
     """Retrieve the global ``JobQueue`` set during app lifespan."""
     from demucster.main import job_queue  # deferred to avoid circular imports
 
@@ -34,14 +43,40 @@ def _queue():
     return job_queue
 
 
+def _resolve_options(
+    *,
+    model: str | None,
+    output_format: str | None,
+    mp3_bitrate: int | None,
+    stems: list[str] | None,
+) -> SeparationOptions:
+    """Apply configured defaults and validate a complete option set."""
+    settings = get_settings()
+    try:
+        options = SeparationOptions(
+            model=model or settings.default_model,
+            output_format=output_format or settings.output_format,
+            mp3_bitrate=mp3_bitrate if mp3_bitrate is not None else settings.mp3_bitrate,
+            stems=stems,
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            422,
+            detail=exc.errors(include_url=False, include_context=False),
+        ) from exc
+    return options
+
+
+def _remove_file(path: Path) -> None:
+    """Remove a temporary response file."""
+    path.unlink(missing_ok=True)
+
+
 def _job_to_response(job: JobRecord) -> JobResponse:
     """Project an internal ``JobRecord`` to the public ``JobResponse`` schema."""
     stems: dict[str, str] | None = None
     if job.stem_paths:
-        stems = {
-            name: f"/api/v1/jobs/{job.job_id}/stems/{name}"
-            for name in job.stem_paths
-        }
+        stems = {name: f"/api/v1/jobs/{job.job_id}/stems/{name}" for name in job.stem_paths}
     return JobResponse(
         job_id=job.job_id,
         status=job.status,
@@ -60,12 +95,13 @@ def _job_to_response(job: JobRecord) -> JobResponse:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 @router.post("/upload", status_code=202, response_model=JobResponse)
 async def upload_file(
     file: Annotated[UploadFile, File(description="Audio file to separate")],
-    model: Annotated[str, Form()] = "htdemucs_ft",
-    output_format: Annotated[str, Form()] = "mp3",
-    mp3_bitrate: Annotated[int, Form()] = 320,
+    model: Annotated[str | None, Form()] = None,
+    output_format: Annotated[str | None, Form()] = None,
+    mp3_bitrate: Annotated[int | None, Form()] = None,
     stems: Annotated[
         str | None,
         Form(description="Comma-separated stem names to extract (e.g. 'vocals,drums')"),
@@ -84,49 +120,74 @@ async def upload_file(
     if not file.filename:
         raise HTTPException(400, "Filename is required")
 
-    suffix = Path(file.filename).suffix.lower()
+    normalised_name = file.filename.replace("\\", "/")
+    safe_name = Path(normalised_name).name
+    if safe_name != normalised_name or safe_name in {"", ".", ".."}:
+        raise HTTPException(422, "Filename must not contain a path")
+
+    suffix = Path(safe_name).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             422,
-            f"Unsupported format '{suffix}'. "
-            f"Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+            f"Unsupported format '{suffix}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
         )
 
-    # --- Read & validate size ---
-    content = await file.read()
-    max_bytes = settings.max_file_size_mb * 1024 * 1024
-    if len(content) > max_bytes:
-        raise HTTPException(413, f"File exceeds maximum size of {settings.max_file_size_mb} MB")
-
-    # --- Build job record ---
-    parsed_stems = [s.strip() for s in stems.split(",") if s.strip()] if stems else None
-    job = JobRecord(
+    parsed_stems = [stem.strip() for stem in stems.split(",")] if stems else None
+    options = _resolve_options(
         model=model,
         output_format=output_format,
         mp3_bitrate=mp3_bitrate,
-        filename=file.filename,
-        requested_stems=parsed_stems,
+        stems=parsed_stems,
+    )
+    assert options.model is not None
+    assert options.output_format is not None
+    assert options.mp3_bitrate is not None
+
+    # --- Build job record ---
+    job = JobRecord(
+        model=options.model,
+        output_format=options.output_format,
+        mp3_bitrate=options.mp3_bitrate,
+        filename=safe_name,
+        requested_stems=options.stems,
     )
 
-    # --- Persist upload ---
+    # --- Stream upload to disk with a hard size limit ---
+    max_bytes = settings.max_file_size_mb * 1024 * 1024
     upload_dir = Path(settings.upload_dir) / job.job_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    input_path = upload_dir / file.filename
-    input_path.write_bytes(content)
+    input_path = upload_dir / safe_name
+    total_bytes = 0
+    try:
+        with input_path.open("wb") as output:
+            while chunk := await file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise HTTPException(
+                        413,
+                        f"File exceeds maximum size of {settings.max_file_size_mb} MB",
+                    )
+                output.write(chunk)
+    except Exception:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        raise
 
     # --- Validate audio integrity ---
     try:
         validate_audio_file(input_path)
     except InvalidAudioError as exc:
-        input_path.unlink(missing_ok=True)
-        upload_dir.rmdir()
+        shutil.rmtree(upload_dir, ignore_errors=True)
         raise HTTPException(422, str(exc)) from exc
 
     job.input_path = str(input_path)
     job.output_dir = str(Path(settings.output_dir) / job.job_id)
 
-    await queue.enqueue(job)
-    logger.info("Upload accepted  job=%s  file=%s", job.job_id, file.filename)
+    try:
+        await queue.enqueue(job)
+    except RuntimeError as exc:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        raise HTTPException(503, "Service is shutting down") from exc
+    logger.info("Upload accepted  job=%s  file=%s", job.job_id, safe_name)
     return _job_to_response(job)
 
 
@@ -139,17 +200,29 @@ async def submit_url(request: URLRequest) -> JobResponse:
     """
     settings = get_settings()
     queue = _queue()
-
-    job = JobRecord(
+    options = _resolve_options(
         model=request.options.model,
         output_format=request.options.output_format,
         mp3_bitrate=request.options.mp3_bitrate,
+        stems=request.options.stems,
+    )
+    assert options.model is not None
+    assert options.output_format is not None
+    assert options.mp3_bitrate is not None
+
+    job = JobRecord(
+        model=options.model,
+        output_format=options.output_format,
+        mp3_bitrate=options.mp3_bitrate,
         source_url=str(request.url),
-        requested_stems=request.options.stems,
+        requested_stems=options.stems,
     )
     job.output_dir = str(Path(settings.output_dir) / job.job_id)
 
-    await queue.enqueue(job)
+    try:
+        await queue.enqueue(job)
+    except RuntimeError as exc:
+        raise HTTPException(503, "Service is shutting down") from exc
     logger.info("URL job accepted  job=%s  url=%s", job.job_id, request.url)
     return _job_to_response(job)
 
@@ -189,8 +262,7 @@ async def download_stem(job_id: str, stem_name: str) -> FileResponse:
     if stem_name not in job.stem_paths:
         raise HTTPException(
             404,
-            f"Stem '{stem_name}' not found. "
-            f"Available: {list(job.stem_paths.keys())}",
+            f"Stem '{stem_name}' not found. Available: {list(job.stem_paths.keys())}",
         )
 
     stem_path = Path(job.stem_paths[stem_name])
@@ -206,7 +278,7 @@ async def download_stem(job_id: str, stem_name: str) -> FileResponse:
 
 
 @router.get("/{job_id}/download-zip")
-async def download_zip(job_id: str) -> StreamingResponse:
+async def download_zip(job_id: str) -> FileResponse:
     """Bundle all stems into a ZIP archive and stream it to the client."""
     queue = _queue()
     job = await queue.get_job(job_id)
@@ -218,22 +290,28 @@ async def download_zip(job_id: str) -> StreamingResponse:
     if not job.stem_paths:
         raise HTTPException(404, "No stems available for this job")
 
-    # Build ZIP in memory
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for _stem_name, stem_path_str in job.stem_paths.items():
-            stem_path = Path(stem_path_str)
-            if stem_path.exists():
-                zf.write(stem_path, stem_path.name)
+    stem_paths = [Path(path) for path in job.stem_paths.values()]
+    if any(not path.exists() for path in stem_paths):
+        raise HTTPException(410, "One or more stem files have been cleaned up")
 
-    buf.seek(0)
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as temporary:
+        zip_path = Path(temporary.name)
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for stem_path in stem_paths:
+                archive.write(stem_path, stem_path.name)
+    except Exception:
+        zip_path.unlink(missing_ok=True)
+        raise
+
     base_name = Path(job.filename).stem if job.filename else job.job_id
     zip_filename = f"{base_name}_stems.zip"
 
-    return StreamingResponse(
-        buf,
+    return FileResponse(
+        zip_path,
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+        filename=zip_filename,
+        background=BackgroundTask(_remove_file, zip_path),
     )
 
 
@@ -241,6 +319,9 @@ async def download_zip(job_id: str) -> StreamingResponse:
 async def delete_job(job_id: str) -> None:
     """Delete a job and purge its associated files from disk."""
     queue = _queue()
-    deleted = await queue.delete_job(job_id)
+    try:
+        deleted = await queue.delete_job(job_id)
+    except JobProcessingError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if not deleted:
         raise HTTPException(404, f"Job not found: {job_id}")

@@ -6,19 +6,21 @@ on any CI runner without CUDA or ffmpeg.
 
 from __future__ import annotations
 
-import struct
 import wave
-from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+if TYPE_CHECKING:
+    from pathlib import Path
+    from typing import Any
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _generate_wav(path: Path, duration_secs: float = 1.0, channels: int = 2) -> Path:
     """Create a minimal valid WAV file filled with silence."""
@@ -35,6 +37,7 @@ def _generate_wav(path: Path, duration_secs: float = 1.0, channels: int = 2) -> 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def tmp_dirs(tmp_path: Path) -> tuple[Path, Path]:
@@ -67,7 +70,6 @@ def _mock_gpu():
 @pytest.fixture()
 def _mock_demucs_separator():
     """Replace ``DemucsService.separate`` with a fast mock that writes dummy stems."""
-    import torch as _torch
 
     def _fake_separate(
         self: Any,
@@ -107,28 +109,15 @@ def _mock_demucs_warmup():
 
 
 @pytest.fixture()
-def _mock_torchaudio_info():
-    """Patch ``torchaudio.info`` to accept any file without reading it."""
-    mock_info = MagicMock()
-    mock_info.num_frames = 44100
-    mock_info.sample_rate = 44100
-    mock_info.num_channels = 2
-    with patch("demucster.services.audio.torchaudio.info", return_value=mock_info):
-        yield
-
-
-@pytest.fixture()
 def client(
     tmp_dirs: tuple[Path, Path],
     _mock_gpu: None,
     _mock_demucs_separator: None,
     _mock_demucs_warmup: None,
-    _mock_torchaudio_info: None,
 ) -> TestClient:  # type: ignore[type-arg]
     """A ``TestClient`` wired to a fully-mocked Demucster app.
 
-    The Demucs separator, GPU, and torchaudio are all mocked so the suite
-    can run without CUDA, ffmpeg, or any model weights.
+    Demucs and GPU calls are mocked so the suite needs no CUDA or model weights.
     """
     upload_dir, output_dir = tmp_dirs
 

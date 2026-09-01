@@ -91,12 +91,21 @@ uv run uvicorn demucster.main:app --reload --host 0.0.0.0 --port 8000
 ### Docker Deployment (Recommended)
 
 ```bash
-# Build and launch with GPU support
+# Run this natively on the ARM64 DGX Spark
 docker compose up --build
 
-# Verify
+# Verify readiness (must report healthy + cuda_available=true)
 curl http://localhost:8000/api/v1/health | jq .
+
+# Submit a real smoke-test track
+curl -X POST http://localhost:8000/api/v1/jobs/upload \
+  -F "file=@smoke-test.wav" \
+  -F "model=htdemucs"
 ```
+
+The Compose file pins an ARM64 NGC image, requires CUDA at startup, persists model
+weights, and runs exactly one Uvicorn process. Do not increase Uvicorn's worker count:
+the queue and job registry are intentionally in-process.
 
 ---
 
@@ -182,7 +191,9 @@ All values are configurable via environment variables or a `.env` file.
 | `OUTPUT_FORMAT` | `mp3` | Stem output format (`mp3` / `wav`) |
 | `MP3_BITRATE` | `320` | MP3 encoding bitrate (kbps) |
 | `MAX_CONCURRENT_JOBS` | `2` | Max simultaneous GPU jobs |
-| `DEVICE` | `cuda` | PyTorch device (`cuda` / `cpu`) |
+| `DEVICE` | `cuda` | PyTorch device (`cpu`, `cuda`, or `cuda:<index>`) |
+| `REQUIRE_CUDA` | `false` (`true` in Docker) | Fail startup if requested CUDA is unavailable |
+| `SEGMENT_SIZE` | unset | Positive integer Demucs segment length in seconds |
 | `UPLOAD_DIR` | `/data/uploads` | Upload storage path |
 | `OUTPUT_DIR` | `/data/outputs` | Stem output path |
 | `MAX_FILE_SIZE_MB` | `500` | Max upload size |
@@ -212,8 +223,19 @@ This service is purpose-built for the **NVIDIA DGX Spark** with its **GB10 Grace
 1. **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** — prevents fragmentation OOM on the large unified pool.
 2. **No `CUDA_MANAGED_FORCE_DEVICE_ALLOC`** — the coherent driver handles memory residency optimally when left alone.
 3. **`torch.cuda` introspection** — health endpoint uses PyTorch APIs, not `pynvml`/`nvidia-smi`, to avoid NVML misreporting.
-4. **NGC base image** (`nvcr.io/nvidia/pytorch:25.06-py3`) — ships with pre-compiled `sm_12x` kernels.
+4. **Pinned NGC base image** (`nvcr.io/nvidia/pytorch:26.07-py3`) — provides the
+   NVIDIA-tested ARM64 CUDA/PyTorch stack; container installation verifies it is not replaced.
 5. **Verify kernel in DGX OS**: ensure `init_on_alloc=0` is set (default on DGX OS) to avoid allocation latency.
+
+### Native acceptance check
+
+Before exposing the service, verify all of the following on the DGX Spark:
+
+1. `docker compose build` succeeds without compiling or replacing PyTorch.
+2. `/api/v1/health` reports compute capability `12.1`, `healthy`, and CUDA available.
+3. A real WAV job reaches `COMPLETED`; each individual stem and the ZIP download work.
+4. `docker compose restart` shuts down cleanly after current queued work drains.
+5. Recreating the container does not re-download model weights from the persistent cache.
 
 ---
 

@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import torch
-import torchaudio
+import soundfile
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import torch
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +30,7 @@ class InvalidAudioError(Exception):
 # Validation
 # ---------------------------------------------------------------------------
 
+
 def validate_audio_file(path: Path) -> None:
     """Verify that *path* is a readable audio file in an allowed format.
 
@@ -33,20 +38,19 @@ def validate_audio_file(path: Path) -> None:
     ------
     InvalidAudioError
         If the file is missing, has a disallowed extension, or cannot be
-        decoded by torchaudio.
+        decoded by libsndfile.
     """
     if not path.exists():
         raise InvalidAudioError(f"File not found: {path}")
 
     if path.suffix.lower() not in ALLOWED_EXTENSIONS:
         raise InvalidAudioError(
-            f"Unsupported format '{path.suffix}'. "
-            f"Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            f"Unsupported format '{path.suffix}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
         )
 
     try:
-        info = torchaudio.info(str(path))
-        if info.num_frames == 0:
+        info = soundfile.info(str(path))
+        if info.frames == 0:
             raise InvalidAudioError(f"Audio file has zero frames: {path.name}")
     except InvalidAudioError:
         raise
@@ -57,6 +61,7 @@ def validate_audio_file(path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Stem persistence
 # ---------------------------------------------------------------------------
+
 
 def save_stem(
     tensor: torch.Tensor,
@@ -97,23 +102,29 @@ def save_stem(
     if t.dim() == 1:
         t = t.unsqueeze(0)
 
+    audio = t.transpose(0, 1).contiguous().numpy()
+
     if output_format == "wav":
-        torchaudio.save(str(output_path), t, sample_rate)
+        soundfile.write(str(output_path), audio, sample_rate, format="WAV")
 
     elif output_format == "mp3":
         # torchaudio's MP3 backend is limited; we shell out to ffmpeg for
         # reliable high-bitrate encoding.
         tmp_wav = output_path.with_suffix(".tmp.wav")
         try:
-            torchaudio.save(str(tmp_wav), t, sample_rate)
+            soundfile.write(str(tmp_wav), audio, sample_rate, format="WAV")
             result = subprocess.run(
                 [
                     "ffmpeg",
                     "-y",
-                    "-i", str(tmp_wav),
-                    "-codec:a", "libmp3lame",
-                    "-b:a", f"{mp3_bitrate}k",
-                    "-loglevel", "error",
+                    "-i",
+                    str(tmp_wav),
+                    "-codec:a",
+                    "libmp3lame",
+                    "-b:a",
+                    f"{mp3_bitrate}k",
+                    "-loglevel",
+                    "error",
                     str(output_path),
                 ],
                 check=True,

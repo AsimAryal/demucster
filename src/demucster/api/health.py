@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter
 
+from demucster.core.config import get_settings
 from demucster.core.gpu import get_gpu_info
 from demucster.models.schemas import HealthResponse, ModelInfo
 from demucster.services.separator import SUPPORTED_MODELS
@@ -24,10 +25,13 @@ async def health_check() -> HealthResponse:
     """
     from demucster.main import job_queue
 
+    settings = get_settings()
     gpu = get_gpu_info()
+    queue_ready = job_queue is not None
+    cuda_ready = gpu["cuda_available"] or not settings.require_cuda
 
     return HealthResponse(
-        status="healthy",
+        status="healthy" if queue_ready and cuda_ready else "unhealthy",
         cuda_available=gpu["cuda_available"],
         device_name=gpu.get("device_name"),
         compute_capability=gpu.get("compute_capability"),

@@ -6,6 +6,7 @@ placed at the project root.  See ``.env.example`` for the full catalogue.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -43,8 +44,13 @@ class Settings(BaseSettings):
         description="Maximum jobs running on GPU simultaneously.",
     )
     device: str = Field(default="cuda", description="PyTorch device string.")
-    segment_size: str | None = Field(
+    require_cuda: bool = Field(
+        default=False,
+        description="Fail startup instead of falling back to CPU when CUDA was requested.",
+    )
+    segment_size: int | None = Field(
         default=None,
+        ge=1,
         description="Demucs segment length override (seconds). None = model default.",
     )
 
@@ -77,10 +83,16 @@ class Settings(BaseSettings):
         from demucster.services.separator import SUPPORTED_MODELS
 
         if v not in SUPPORTED_MODELS:
-            raise ValueError(
-                f"Unsupported model '{v}'. Choose from: {', '.join(SUPPORTED_MODELS)}"
-            )
+            raise ValueError(f"Unsupported model '{v}'. Choose from: {', '.join(SUPPORTED_MODELS)}")
         return v
+
+    @field_validator("device")
+    @classmethod
+    def _validate_device(cls, value: str) -> str:
+        value = value.lower().strip()
+        if not re.fullmatch(r"(?:cpu|cuda(?::\d+)?)", value):
+            raise ValueError("DEVICE must be 'cpu', 'cuda', or 'cuda:<index>'")
+        return value
 
 
 @lru_cache(maxsize=1)

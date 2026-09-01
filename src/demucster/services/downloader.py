@@ -71,9 +71,7 @@ def download_audio(
 
     # Duration filter — reject videos longer than max_duration
     if max_duration > 0:
-        ydl_opts["match_filter"] = yt_dlp.utils.match_filter_func(
-            f"duration <= {max_duration}"
-        )
+        ydl_opts["match_filter"] = yt_dlp.utils.match_filter_func(f"duration <= {max_duration}")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -91,9 +89,7 @@ def download_audio(
                 if candidates:
                     downloaded = candidates[0]
                 else:
-                    raise DownloadError(
-                        f"Downloaded file not found.  Expected: {downloaded}"
-                    )
+                    raise DownloadError(f"Downloaded file not found.  Expected: {downloaded}")
 
             metadata: dict[str, Any] = {
                 "title": info.get("title", "Unknown"),

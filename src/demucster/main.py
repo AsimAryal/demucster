@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import AsyncIterator
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +26,9 @@ from demucster.services.cleanup import run_cleanup_loop
 from demucster.services.separator import DemucsService
 from demucster.worker.queue import JobQueue, JobRecord
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+
 logger = logging.getLogger(__name__)
 
 # Module-level references so endpoint code can import them directly.
@@ -37,9 +40,10 @@ demucs_service: DemucsService | None = None
 # Synchronous job processor (runs inside ``loop.run_in_executor``)
 # ---------------------------------------------------------------------------
 
+
 def _process_job(
     job: JobRecord,
-    progress_callback: callable,  # type: ignore[valid-type]
+    progress_callback: Callable[[float], None],
 ) -> dict[str, Path]:
     """Execute one separation job.
 
@@ -50,7 +54,7 @@ def _process_job(
 
     settings = get_settings()
     input_path: Path | None = Path(job.input_path) if job.input_path else None
-    output_dir: Path = Path(job.output_dir) if job.output_dir else Path(settings.output_dir) / job.job_id
+    output_dir = Path(job.output_dir) if job.output_dir else Path(settings.output_dir) / job.job_id
 
     # --- URL jobs: download audio first ---
     if job.source_url and input_path is None:
@@ -70,6 +74,10 @@ def _process_job(
     if input_path is None:
         raise RuntimeError("Job has no input_path and no source_url")
 
+    from demucster.services.audio import validate_audio_file
+
+    validate_audio_file(input_path)
+
     return demucs_service.separate(
         input_path=input_path,
         output_dir=output_dir,
@@ -85,10 +93,11 @@ def _process_job(
 # Lifespan
 # ---------------------------------------------------------------------------
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application startup and shutdown lifecycle."""
-    global job_queue, demucs_service  # noqa: PLW0603
+    global job_queue, demucs_service
 
     settings = get_settings()
     setup_logging(level=settings.log_level)
@@ -100,12 +109,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Path(settings.output_dir).mkdir(parents=True, exist_ok=True)
 
     # GPU device
-    device = get_device(preferred=settings.device)
+    device = get_device(preferred=settings.device, require_cuda=settings.require_cuda)
     logger.info("Device: %s", device)
 
     # Demucs service
-    segment = int(settings.segment_size) if settings.segment_size else None
-    demucs_service = DemucsService(device=device, segment=segment)
+    demucs_service = DemucsService(device=device, segment=settings.segment_size)
 
     if settings.prewarm_model:
         try:
@@ -125,6 +133,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         run_cleanup_loop(
             directories=[Path(settings.upload_dir), Path(settings.output_dir)],
             retention_hours=settings.retention_hours,
+            protected_ids_provider=job_queue.protected_job_ids,
+            registry_cleanup=job_queue.cleanup_expired,
         ),
         name="cleanup",
     )
@@ -136,10 +146,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Shutdown
     logger.info("Shutting down Demucster …")
     cleanup_task.cancel()
-    try:
+    with suppress(asyncio.CancelledError):
         await cleanup_task
-    except asyncio.CancelledError:
-        pass
 
     if job_queue is not None:
         await job_queue.stop()
@@ -150,6 +158,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
+
 
 def create_app() -> FastAPI:
     """Build and return the configured ``FastAPI`` application."""
@@ -170,7 +179,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

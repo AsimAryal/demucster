@@ -1,9 +1,8 @@
 """Asynchronous job queue with bounded GPU concurrency.
 
-The queue is entirely in-process — no Redis or Celery required — using an
-``asyncio.Queue`` for FIFO ordering and an ``asyncio.Semaphore`` to cap
-concurrent GPU inference and prevent VRAM exhaustion on the DGX Spark's
-unified 128 GB memory pool.
+The queue is entirely in-process — no Redis or Celery required. A fixed number
+of worker tasks consume an ``asyncio.Queue`` in FIFO order, bounding concurrent
+GPU inference on the DGX Spark's unified 128 GB memory pool.
 
 Job state is tracked in a ``dict[str, JobRecord]`` guarded by an
 ``asyncio.Lock``.  This is suitable for a single-instance deployment; for
@@ -16,17 +15,15 @@ import asyncio
 import logging
 import shutil
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any
 
 import torch
 from pydantic import BaseModel, Field
 
 from demucster.models.schemas import JobStatus
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +31,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Job record — Pydantic model (not dataclass) per project convention
 # ---------------------------------------------------------------------------
+
 
 class JobRecord(BaseModel):
     """Internal, mutable representation of a separation job.
@@ -46,7 +44,7 @@ class JobRecord(BaseModel):
     status: JobStatus = JobStatus.QUEUED
     progress_pct: float = 0.0
     error_message: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
 
     # File paths
@@ -73,9 +71,28 @@ ProcessFn = Callable[[JobRecord, Callable[[float], None]], dict[str, Path]]
 """Signature: (job, progress_callback) → {stem_name: output_path}"""
 
 
+class JobProcessingError(RuntimeError):
+    """Raised when an operation is unsafe while a job is processing."""
+
+
+def _delete_job_files(job: JobRecord, *, include_input: bool = True) -> None:
+    """Delete files associated with a job."""
+    if job.output_dir:
+        shutil.rmtree(Path(job.output_dir), ignore_errors=True)
+
+    if include_input and job.input_path:
+        input_path = Path(job.input_path)
+        parent = input_path.parent
+        if parent.name == job.job_id:
+            shutil.rmtree(parent, ignore_errors=True)
+        else:
+            input_path.unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Job queue
 # ---------------------------------------------------------------------------
+
 
 class JobQueue:
     """In-process async job queue with bounded GPU concurrency.
@@ -90,12 +107,13 @@ class JobQueue:
 
     def __init__(self, max_concurrent: int = 2) -> None:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
-        self._semaphore = asyncio.Semaphore(max_concurrent)
         self._registry: dict[str, JobRecord] = {}
         self._lock = asyncio.Lock()
-        self._worker_task: asyncio.Task[None] | None = None
+        self._worker_tasks: list[asyncio.Task[None]] = []
         self._process_fn: ProcessFn | None = None
         self._max_concurrent = max_concurrent
+        self._active_count = 0
+        self._accepting = True
         logger.info("JobQueue initialised: max_concurrent=%d", max_concurrent)
 
     # -- Lifecycle -----------------------------------------------------------
@@ -111,23 +129,30 @@ class JobQueue:
             the event loop.
         """
         self._process_fn = process_fn
-        self._worker_task = asyncio.create_task(self._worker_loop(), name="job-worker")
-        logger.info("Job worker loop started")
+        self._accepting = True
+        self._worker_tasks = [
+            asyncio.create_task(self._worker_loop(), name=f"job-worker-{index}")
+            for index in range(self._max_concurrent)
+        ]
+        logger.info("Started %d job worker(s)", self._max_concurrent)
 
     async def stop(self) -> None:
-        """Cancel the worker loop and wait for it to finish."""
-        if self._worker_task is not None:
-            self._worker_task.cancel()
-            try:
-                await self._worker_task
-            except asyncio.CancelledError:
-                pass
-        logger.info("Job worker loop stopped")
+        """Stop accepting jobs, drain queued work, and stop worker loops."""
+        self._accepting = False
+        await self._queue.join()
+        for task in self._worker_tasks:
+            task.cancel()
+        if self._worker_tasks:
+            await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+        self._worker_tasks.clear()
+        logger.info("Job workers stopped")
 
     # -- Public interface ----------------------------------------------------
 
     async def enqueue(self, job: JobRecord) -> str:
         """Append *job* to the queue and return its ``job_id``."""
+        if not self._accepting:
+            raise RuntimeError("Job queue is not accepting new work")
         async with self._lock:
             self._registry[job.job_id] = job
         await self._queue.put(job.job_id)
@@ -164,39 +189,55 @@ class JobQueue:
         Returns ``True`` if the job existed and was removed, ``False`` otherwise.
         """
         async with self._lock:
-            job = self._registry.pop(job_id, None)
+            job = self._registry.get(job_id)
+            if job is not None and job.status == JobStatus.PROCESSING:
+                raise JobProcessingError("Processing jobs cannot be deleted")
+            if job is not None:
+                self._registry.pop(job_id)
 
         if job is None:
             return False
 
-        # Clean output directory
-        if job.output_dir:
-            output_path = Path(job.output_dir)
-            if output_path.exists():
-                shutil.rmtree(output_path, ignore_errors=True)
-
-        # Clean input file / upload directory
-        if job.input_path:
-            input_path = Path(job.input_path)
-            parent = input_path.parent
-            if parent.name == job.job_id and parent.exists():
-                shutil.rmtree(parent, ignore_errors=True)
-            elif input_path.exists():
-                input_path.unlink(missing_ok=True)
-
+        await asyncio.to_thread(_delete_job_files, job)
         logger.info("Job deleted: %s", job_id)
         return True
+
+    async def protected_job_ids(self) -> set[str]:
+        """Return IDs whose files must not be removed by retention cleanup."""
+        async with self._lock:
+            return {
+                job.job_id
+                for job in self._registry.values()
+                if job.status in {JobStatus.QUEUED, JobStatus.PROCESSING}
+            }
+
+    async def cleanup_expired(self, retention_seconds: float) -> int:
+        """Remove expired terminal jobs from memory and disk."""
+        cutoff = datetime.now(UTC).timestamp() - retention_seconds
+        async with self._lock:
+            expired = [
+                job
+                for job in self._registry.values()
+                if job.status in {JobStatus.COMPLETED, JobStatus.FAILED}
+                and (job.completed_at or job.created_at).timestamp() < cutoff
+            ]
+            for job in expired:
+                self._registry.pop(job.job_id, None)
+
+        for job in expired:
+            await asyncio.to_thread(_delete_job_files, job)
+        return len(expired)
 
     async def update_progress(self, job_id: str, progress_pct: float) -> None:
         """Thread-safe progress update (called from the executor thread)."""
         async with self._lock:
             if job_id in self._registry:
-                self._registry[job_id].progress_pct = min(progress_pct, 100.0)
+                self._registry[job_id].progress_pct = max(0.0, min(progress_pct, 100.0))
 
     @property
     def active_count(self) -> int:
-        """Number of jobs currently holding the GPU semaphore."""
-        return self._max_concurrent - self._semaphore._value  # noqa: SLF001
+        """Number of jobs currently running."""
+        return self._active_count
 
     @property
     def queued_count(self) -> int:
@@ -206,70 +247,74 @@ class JobQueue:
     # -- Internal worker -----------------------------------------------------
 
     async def _worker_loop(self) -> None:
-        """Pull job IDs from the queue and spawn bounded tasks."""
+        """Pull and execute jobs; one loop exists per concurrency slot."""
         while True:
+            job_id = await self._queue.get()
             try:
-                job_id = await self._queue.get()
-                asyncio.create_task(self._run_job(job_id), name=f"job-{job_id[:8]}")
+                await self._run_job(job_id)
             except asyncio.CancelledError:
                 logger.info("Worker loop cancelled")
                 raise
             except Exception:
                 logger.exception("Unexpected error in worker loop")
+            finally:
+                self._queue.task_done()
 
     async def _run_job(self, job_id: str) -> None:
-        """Acquire the GPU semaphore and execute one job."""
-        async with self._semaphore:
-            job = await self.get_job(job_id)
+        """Execute one job in the default thread-pool executor."""
+        async with self._lock:
+            job = self._registry.get(job_id)
             if job is None:
-                logger.warning("Job %s vanished before processing", job_id)
+                logger.debug("Skipping deleted queued job %s", job_id)
                 return
+            job.status = JobStatus.PROCESSING
+            job.progress_pct = 0.0
 
-            # Mark as PROCESSING
-            async with self._lock:
-                job.status = JobStatus.PROCESSING
-                job.progress_pct = 0.0
+        self._active_count += 1
+        loop = asyncio.get_running_loop()
 
-            # Capture the running loop so the sync callback can schedule updates
-            loop = asyncio.get_running_loop()
-
-            def _progress_cb(pct: float) -> None:
-                asyncio.run_coroutine_threadsafe(
-                    self.update_progress(job_id, pct),
-                    loop,
-                )
-
+        def _progress_cb(pct: float) -> None:
             try:
-                if self._process_fn is None:
-                    raise RuntimeError("No process function registered with the queue")
+                asyncio.run_coroutine_threadsafe(self.update_progress(job_id, pct), loop)
+            except RuntimeError:
+                logger.debug("Progress update dropped while event loop is closing")
 
-                stem_paths: dict[str, Path] = await loop.run_in_executor(
-                    None,
-                    lambda: self._process_fn(job, _progress_cb),  # type: ignore[arg-type]
+        try:
+            if self._process_fn is None:
+                raise RuntimeError("No process function registered with the queue")
+
+            stem_paths = await loop.run_in_executor(
+                None,
+                lambda: self._process_fn(job, _progress_cb),  # type: ignore[arg-type]
+            )
+            if not stem_paths:
+                raise RuntimeError("Separation completed without producing stems")
+
+            async with self._lock:
+                job.status = JobStatus.COMPLETED
+                job.progress_pct = 100.0
+                job.completed_at = datetime.now(UTC)
+                job.stem_paths = {key: str(value) for key, value in stem_paths.items()}
+            logger.info("Job completed: %s  (%d stems)", job_id, len(stem_paths))
+
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            await asyncio.to_thread(_delete_job_files, job, include_input=False)
+            async with self._lock:
+                job.status = JobStatus.FAILED
+                job.error_message = (
+                    "GPU out of memory. Try a shorter audio file or a lighter model "
+                    "(e.g. mdx_extra_q instead of htdemucs_ft)."
                 )
+                job.completed_at = datetime.now(UTC)
+            logger.error("Job %s failed: CUDA OOM", job_id)
 
-                async with self._lock:
-                    job.status = JobStatus.COMPLETED
-                    job.progress_pct = 100.0
-                    job.completed_at = datetime.now(timezone.utc)
-                    job.stem_paths = {k: str(v) for k, v in stem_paths.items()}
-
-                logger.info("Job completed: %s  (%d stems)", job_id, len(stem_paths))
-
-            except torch.cuda.OutOfMemoryError:
-                torch.cuda.empty_cache()
-                async with self._lock:
-                    job.status = JobStatus.FAILED
-                    job.error_message = (
-                        "GPU out of memory. Try a shorter audio file or a lighter model "
-                        "(e.g. mdx_extra_q instead of htdemucs_ft)."
-                    )
-                    job.completed_at = datetime.now(timezone.utc)
-                logger.error("Job %s failed: CUDA OOM", job_id)
-
-            except Exception as exc:
-                async with self._lock:
-                    job.status = JobStatus.FAILED
-                    job.error_message = str(exc)
-                    job.completed_at = datetime.now(timezone.utc)
-                logger.exception("Job %s failed", job_id)
+        except Exception as exc:
+            await asyncio.to_thread(_delete_job_files, job, include_input=False)
+            async with self._lock:
+                job.status = JobStatus.FAILED
+                job.error_message = str(exc)
+                job.completed_at = datetime.now(UTC)
+            logger.exception("Job %s failed", job_id)
+        finally:
+            self._active_count -= 1

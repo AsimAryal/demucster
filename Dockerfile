@@ -1,7 +1,7 @@
 # =============================================================================
 # Demucster — GPU-accelerated audio stem separation
 # =============================================================================
-# Base: NVIDIA NGC PyTorch with CUDA 12.8+ and pre-compiled sm_12x kernels
+# Base: NVIDIA NGC PyTorch with CUDA 13 and pre-compiled Blackwell kernels
 # for the DGX Spark GB10 (Blackwell) architecture.
 #
 # Key decisions:
@@ -15,33 +15,45 @@
 #     driver manages residency natively.
 # =============================================================================
 
-FROM nvcr.io/nvidia/pytorch:25.06-py3
+FROM nvcr.io/nvidia/pytorch:26.07-py3
 
 LABEL maintainer="Demucster Team"
 LABEL description="GPU-accelerated Demucs stem separation microservice"
 
 # --- System dependencies ----------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cargo \
+        cmake \
         ffmpeg \
         libsndfile1 \
+        libopus-dev \
+        pkg-config \
+        rustc \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Install uv package manager ---------------------------------------------
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.8.3 /uv /uvx /usr/local/bin/
 
 # --- Application code -------------------------------------------------------
 WORKDIR /app
 
-# Copy project metadata first for layer caching
-COPY pyproject.toml .python-version ./
+# Copy project metadata first for layer caching. README is required by Hatchling.
+COPY pyproject.toml requirements-container.txt README.md .python-version ./
 
 # Copy source tree
 COPY src/ src/
 
-# Install project + dependencies into the system Python (which already has
-# torch and torchaudio from the NGC base).  --no-build-isolation avoids
-# rebuilding torch from source.
-RUN uv pip install --system --no-cache --no-build-isolation -e .
+# Isolate application packages while inheriting NGC's system torch/torchaudio.
+# The no-deps export cannot resolve or replace the NVIDIA framework packages.
+RUN python -m venv --system-site-packages /opt/demucster \
+    && base_torch="$(/opt/demucster/bin/python -c 'import torch; print(torch.__version__)')" \
+    && base_torchaudio="$(/opt/demucster/bin/python -c 'import torchaudio; print(torchaudio.__version__)')" \
+    && uv pip install --python /opt/demucster/bin/python --no-cache --no-deps --require-hashes \
+        -r requirements-container.txt \
+    && uv pip install --python /opt/demucster/bin/python --no-cache --no-deps -e . \
+    && test "$(/opt/demucster/bin/python -c 'import torch; print(torch.__version__)')" = "${base_torch}" \
+    && test "$(/opt/demucster/bin/python -c 'import torchaudio; print(torchaudio.__version__)')" = "${base_torchaudio}"
 
 # --- Environment variables --------------------------------------------------
 # GB10 Blackwell allocator tuning
@@ -60,6 +72,7 @@ ENV MAX_CONCURRENT_JOBS=2
 ENV RETENTION_HOURS=24
 ENV LOG_LEVEL=INFO
 ENV PREWARM_MODEL=true
+ENV REQUIRE_CUDA=true
 
 # --- Non-root user -----------------------------------------------------------
 RUN useradd --create-home --shell /bin/bash demucster \
@@ -71,7 +84,7 @@ USER demucster
 # --- Entrypoint --------------------------------------------------------------
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "demucster.main:app", \
+CMD ["/opt/demucster/bin/python", "-m", "uvicorn", "demucster.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
      "--workers", "1"]

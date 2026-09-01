@@ -6,18 +6,18 @@ validation, and OpenAPI generation consistent across the codebase.
 
 from __future__ import annotations
 
-from datetime import datetime
-from enum import Enum
+from datetime import datetime  # noqa: TC003 - Pydantic resolves this at runtime
+from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------------
 
-class JobStatus(str, Enum):
+
+class JobStatus(StrEnum):
     """Lifecycle states for a separation job."""
 
     QUEUED = "QUEUED"
@@ -30,22 +30,23 @@ class JobStatus(str, Enum):
 # Request schemas
 # ---------------------------------------------------------------------------
 
+
 class SeparationOptions(BaseModel):
     """User-configurable knobs for a separation job."""
 
-    model: str = Field(
-        default="htdemucs_ft",
+    model: str | None = Field(
+        default=None,
         description=(
             "Demucs model name. Ranked best → fastest: "
             "htdemucs_ft, htdemucs, htdemucs_6s, mdx_extra, mdx_extra_q, mdx"
         ),
     )
-    output_format: Literal["mp3", "wav"] = Field(
-        default="mp3",
+    output_format: Literal["mp3", "wav"] | None = Field(
+        default=None,
         description="Stem output format.",
     )
-    mp3_bitrate: int = Field(
-        default=320,
+    mp3_bitrate: int | None = Field(
+        default=None,
         ge=128,
         le=320,
         description="MP3 encoding bitrate (kbps). Ignored when output_format is wav.",
@@ -55,11 +56,49 @@ class SeparationOptions(BaseModel):
         description="Specific stems to extract (e.g. ['vocals', 'drums']). None = all.",
     )
 
+    @field_validator("model")
+    @classmethod
+    def _validate_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from demucster.services.separator import SUPPORTED_MODELS
+
+        if value not in SUPPORTED_MODELS:
+            raise ValueError(f"Unsupported model '{value}'")
+        return value
+
+    @field_validator("stems")
+    @classmethod
+    def _validate_stem_names(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned = list(dict.fromkeys(stem.strip().lower() for stem in value if stem.strip()))
+        if not cleaned:
+            raise ValueError("At least one stem must be requested")
+        if any(not stem.isidentifier() for stem in cleaned):
+            raise ValueError("Stem names may contain only letters, numbers, and underscores")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _validate_stems_for_model(self) -> SeparationOptions:
+        if self.model is None or self.stems is None:
+            return self
+        from demucster.services.separator import SUPPORTED_MODELS
+
+        available = set(SUPPORTED_MODELS[self.model]["stems"])
+        invalid = sorted(set(self.stems) - available)
+        if invalid:
+            raise ValueError(
+                f"Stems {invalid} are unavailable for model '{self.model}'; "
+                f"choose from {sorted(available)}"
+            )
+        return self
+
 
 class URLRequest(BaseModel):
     """Request body for URL-based job submission."""
 
-    url: str = Field(
+    url: HttpUrl = Field(
         ...,
         description="Public audio URL (YouTube, SoundCloud, direct link, etc.).",
     )
@@ -69,6 +108,7 @@ class URLRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Response schemas
 # ---------------------------------------------------------------------------
+
 
 class JobResponse(BaseModel):
     """Public representation of a separation job returned by all job endpoints."""

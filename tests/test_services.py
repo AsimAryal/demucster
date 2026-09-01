@@ -11,14 +11,15 @@ import pytest
 from demucster.services.audio import (
     ALLOWED_EXTENSIONS,
     InvalidAudioError,
+    save_stem,
     validate_audio_file,
 )
 from demucster.services.cleanup import _purge_old_files
 
-
 # =====================================================================
 # Audio validation
 # =====================================================================
+
 
 class TestAudioValidation:
     """``validate_audio_file`` — format and integrity checks."""
@@ -37,31 +38,50 @@ class TestAudioValidation:
         wav = tmp_path / "empty.wav"
         wav.write_bytes(b"\x00" * 44)  # minimal WAV header, no frames
 
-        mock_info = MagicMock()
-        mock_info.num_frames = 0
-        with patch("demucster.services.audio.torchaudio.info", return_value=mock_info):
-            with pytest.raises(InvalidAudioError, match="zero frames"):
-                validate_audio_file(wav)
+        with pytest.raises(InvalidAudioError):
+            validate_audio_file(wav)
 
     def test_accepts_valid_wav(self, tmp_path: Path):
         from tests.conftest import _generate_wav
 
         wav = _generate_wav(tmp_path / "good.wav")
-
-        mock_info = MagicMock()
-        mock_info.num_frames = 44100
-        with patch("demucster.services.audio.torchaudio.info", return_value=mock_info):
-            # Should not raise
-            validate_audio_file(wav)
+        validate_audio_file(wav)
 
     def test_allowed_extensions_complete(self):
         expected = {".mp3", ".wav", ".flac", ".ogg", ".m4a"}
-        assert ALLOWED_EXTENSIONS == expected
+        assert expected == ALLOWED_EXTENSIONS
+
+    def test_saves_wav_with_soundfile(self, tmp_path: Path) -> None:
+        import soundfile
+        import torch
+
+        output = tmp_path / "stem.wav"
+        save_stem(torch.zeros((2, 800)), 8000, output, output_format="wav")
+
+        info = soundfile.info(output)
+        assert info.frames == 800
+        assert info.channels == 2
+
+    def test_mp3_reports_missing_ffmpeg(self, tmp_path: Path) -> None:
+        import torch
+
+        output = tmp_path / "stem.mp3"
+        with (
+            patch(
+                "demucster.services.audio.subprocess.run",
+                side_effect=FileNotFoundError,
+            ),
+            pytest.raises(RuntimeError, match="ffmpeg not found"),
+        ):
+            save_stem(torch.zeros((2, 800)), 8000, output, output_format="mp3")
+
+        assert not output.with_suffix(".tmp.wav").exists()
 
 
 # =====================================================================
 # Cleanup / purge
 # =====================================================================
+
 
 class TestCleanup:
     """``_purge_old_files`` — retention enforcement."""
@@ -107,10 +127,30 @@ class TestCleanup:
         deleted = _purge_old_files([Path("/nonexistent/dir")], retention_seconds=1)
         assert deleted == 0
 
+    def test_preserves_protected_job_files(self, tmp_path: Path):
+        protected_dir = tmp_path / "active-job"
+        protected_dir.mkdir()
+        old_file = protected_dir / "input.wav"
+        old_file.write_bytes(b"\x00")
+
+        import os
+
+        past = time.time() - 100_000
+        os.utime(old_file, (past, past))
+
+        deleted = _purge_old_files(
+            [tmp_path],
+            retention_seconds=3600,
+            protected_job_ids={"active-job"},
+        )
+        assert deleted == 0
+        assert old_file.exists()
+
 
 # =====================================================================
 # Downloader (mocked — no actual network calls)
 # =====================================================================
+
 
 class TestDownloader:
     """``download_audio`` with mocked yt-dlp."""
@@ -128,16 +168,14 @@ class TestDownloader:
             "duration": 180,
             "uploader": "Test Artist",
         }
-        mock_ydl_instance.prepare_filename.return_value = str(
-            tmp_path / "Test Song.webm"
-        )
+        mock_ydl_instance.prepare_filename.return_value = str(tmp_path / "Test Song.webm")
         mock_ydl_instance.__enter__ = MagicMock(return_value=mock_ydl_instance)
         mock_ydl_instance.__exit__ = MagicMock(return_value=False)
 
-        with patch("demucster.services.downloader.yt_dlp") as mock_ytdlp:
-            mock_ytdlp.YoutubeDL.return_value = mock_ydl_instance
-            mock_ytdlp.utils.match_filter_func = MagicMock(return_value=None)
-
+        with (
+            patch("yt_dlp.YoutubeDL", return_value=mock_ydl_instance),
+            patch("yt_dlp.utils.match_filter_func", return_value=None),
+        ):
             path, meta = download_audio("https://example.com/video", tmp_path)
 
         assert path.exists()
@@ -145,29 +183,26 @@ class TestDownloader:
         assert meta["duration"] == 180
 
     def test_download_raises_on_failure(self, tmp_path: Path):
+        import yt_dlp
+
         from demucster.services.downloader import DownloadError, download_audio
 
-        with patch("demucster.services.downloader.yt_dlp") as mock_ytdlp:
-            import yt_dlp as _real_ytdlp
-
-            mock_ytdlp.utils.DownloadError = _real_ytdlp.utils.DownloadError
-            mock_ytdlp.utils.match_filter_func = MagicMock(return_value=None)
-
-            mock_ydl_instance = MagicMock()
-            mock_ydl_instance.extract_info.side_effect = _real_ytdlp.utils.DownloadError(
-                "404 Not Found"
-            )
-            mock_ydl_instance.__enter__ = MagicMock(return_value=mock_ydl_instance)
-            mock_ydl_instance.__exit__ = MagicMock(return_value=False)
-            mock_ytdlp.YoutubeDL.return_value = mock_ydl_instance
-
-            with pytest.raises(DownloadError, match="Failed to download"):
-                download_audio("https://example.com/bad", tmp_path)
+        mock_ydl_instance = MagicMock()
+        mock_ydl_instance.extract_info.side_effect = yt_dlp.utils.DownloadError("404 Not Found")
+        mock_ydl_instance.__enter__ = MagicMock(return_value=mock_ydl_instance)
+        mock_ydl_instance.__exit__ = MagicMock(return_value=False)
+        with (
+            patch("yt_dlp.YoutubeDL", return_value=mock_ydl_instance),
+            patch("yt_dlp.utils.match_filter_func", return_value=None),
+            pytest.raises(DownloadError, match="Failed to download"),
+        ):
+            download_audio("https://example.com/bad", tmp_path)
 
 
 # =====================================================================
 # Separator (model metadata only — no real inference)
 # =====================================================================
+
 
 class TestSeparatorMetadata:
     """``SUPPORTED_MODELS`` catalogue."""
@@ -192,3 +227,19 @@ class TestSeparatorMetadata:
         assert len(stems) == 6
         assert "guitar" in stems
         assert "piano" in stems
+
+
+def test_demucs_progress_uses_real_callback_fields() -> None:
+    """Progress calculation consumes Demucs 4 callback keys."""
+    from demucster.services.separator import _demucs_progress_pct
+
+    progress = _demucs_progress_pct(
+        {
+            "models": 4,
+            "model_idx_in_bag": 1,
+            "segment_offset": 500,
+            "audio_length": 1000,
+            "state": "end",
+        }
+    )
+    assert progress == pytest.approx(37.5)

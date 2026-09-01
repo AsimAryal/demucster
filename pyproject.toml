@@ -19,17 +19,17 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Analysis",
 ]
 dependencies = [
-    "fastapi[standard]>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
-    "pydantic>=2.0",
-    "pydantic-settings>=2.0",
-    "python-multipart>=0.0.12",
-    "torch>=2.7.0",
-    "torchaudio>=2.7.0",
-    "demucs>=4.0.0",
-    "soundfile>=0.12.0",
-    "ffmpeg-python>=0.2.0",
-    "yt-dlp>=2024.0",
+    "fastapi[standard]>=0.115.0,<1",
+    "uvicorn[standard]>=0.30.0,<1",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "python-multipart>=0.0.12,<1",
+    "torch>=2.7.0,<3",
+    "torchaudio>=2.7.0,<3",
+    "demucs==4.0.1; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "demucs==4.1.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "soundfile>=0.12.0,<1",
+    "yt-dlp>=2024.0,<2027",
 ]
 
 [dependency-groups]
@@ -45,7 +45,8 @@ dev = [
 packages = ["src/demucster"]
 
 # ---------------------------------------------------------------------------
-# uv — PyTorch CUDA 12.8 index for Blackwell (sm_12x) kernel support
+# uv — CUDA wheels are for local development. The Docker image deliberately
+# keeps the NVIDIA-tuned torch and torchaudio supplied by its NGC base image.
 # ---------------------------------------------------------------------------
 [tool.uv]
 default-groups = ["dev"]

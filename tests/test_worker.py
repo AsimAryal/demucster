@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING
 
 import pytest
 
 from demucster.models.schemas import JobStatus
-from demucster.worker.queue import JobQueue, JobRecord
+from demucster.worker.queue import JobProcessingError, JobQueue, JobRecord
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.fixture()
@@ -148,6 +152,23 @@ class TestJobQueue:
 
         await q.stop()
 
+    async def test_worker_rejects_empty_output(self, _no_torch_cuda: None) -> None:
+        """A job with no deliverable stems must be marked failed."""
+
+        def empty_fn(job: JobRecord, progress_cb: Callable[[float], None]) -> dict[str, Path]:
+            return {}
+
+        queue = JobQueue(max_concurrent=1)
+        await queue.start(empty_fn)
+        job = JobRecord()
+        await queue.enqueue(job)
+        await queue.stop()
+
+        failed = await queue.get_job(job.job_id)
+        assert failed is not None
+        assert failed.status == JobStatus.FAILED
+        assert "without producing stems" in (failed.error_message or "")
+
     async def test_active_and_queued_counts(self):
         q = JobQueue(max_concurrent=2)
         assert q.active_count == 0
@@ -158,3 +179,76 @@ class TestJobQueue:
             await q.enqueue(job)
 
         assert q.queued_count == 3
+
+    async def test_processing_job_cannot_be_deleted(
+        self, tmp_path: Path, _no_torch_cuda: None
+    ) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def process_fn(
+            job: JobRecord,
+            progress_cb: Callable[[float], None],
+        ) -> dict[str, Path]:
+            started.set()
+            release.wait(timeout=5)
+            output = Path(job.output_dir or tmp_path) / "vocals.wav"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"stem")
+            return {"vocals": output}
+
+        queue = JobQueue(max_concurrent=1)
+        await queue.start(process_fn)
+        job = JobRecord(output_dir=str(tmp_path / "output"))
+        await queue.enqueue(job)
+        await asyncio.to_thread(started.wait, 2)
+
+        with pytest.raises(JobProcessingError):
+            await queue.delete_job(job.job_id)
+
+        release.set()
+        await queue.stop()
+
+    async def test_stop_drains_queued_jobs(self, tmp_path: Path, _no_torch_cuda: None) -> None:
+        def process_fn(job: JobRecord, progress_cb: Callable[[float], None]) -> dict[str, Path]:
+            output = Path(job.output_dir or tmp_path) / "vocals.wav"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"stem")
+            return {"vocals": output}
+
+        queue = JobQueue(max_concurrent=1)
+        await queue.start(process_fn)
+        jobs = [JobRecord(output_dir=str(tmp_path / f"output-{index}")) for index in range(2)]
+        for job in jobs:
+            await queue.enqueue(job)
+
+        await queue.stop()
+
+        for job in jobs:
+            completed = await queue.get_job(job.job_id)
+            assert completed is not None
+            assert completed.status == JobStatus.COMPLETED
+
+    async def test_metrics_include_waiting_jobs(self, tmp_path: Path, _no_torch_cuda: None) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def process_fn(job: JobRecord, progress_cb: Callable[[float], None]) -> dict[str, Path]:
+            started.set()
+            release.wait(timeout=5)
+            output = Path(job.output_dir or tmp_path) / "vocals.wav"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"stem")
+            return {"vocals": output}
+
+        queue = JobQueue(max_concurrent=1)
+        await queue.start(process_fn)
+        await queue.enqueue(JobRecord(output_dir=str(tmp_path / "one")))
+        await queue.enqueue(JobRecord(output_dir=str(tmp_path / "two")))
+        await asyncio.to_thread(started.wait, 2)
+
+        assert queue.active_count == 1
+        assert queue.queued_count == 1
+
+        release.set()
+        await queue.stop()

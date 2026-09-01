@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from fastapi.testclient import TestClient
+if TYPE_CHECKING:
+    from pathlib import Path
 
+    from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _wait_for_completion(client: TestClient, job_id: str, timeout: float = 10.0) -> dict:
     """Poll the job status endpoint until ``COMPLETED`` or ``FAILED``."""
@@ -27,6 +30,7 @@ def _wait_for_completion(client: TestClient, job_id: str, timeout: float = 10.0)
 # ---------------------------------------------------------------------------
 # Upload endpoint
 # ---------------------------------------------------------------------------
+
 
 class TestUpload:
     """POST /api/v1/jobs/upload"""
@@ -54,9 +58,30 @@ class TestUpload:
             )
         assert resp.status_code == 422
 
-    def test_upload_completes_and_stems_available(
-        self, client: TestClient, sample_wav: Path
-    ):
+    def test_upload_rejects_filename_path_traversal(self, client: TestClient, sample_wav: Path):
+        resp = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("../song.wav", sample_wav.read_bytes(), "audio/wav")},
+        )
+        assert resp.status_code == 422
+
+    def test_upload_rejects_invalid_options(self, client: TestClient, sample_wav: Path):
+        resp = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("song.wav", sample_wav.read_bytes(), "audio/wav")},
+            data={"model": "not-a-model", "output_format": "flac"},
+        )
+        assert resp.status_code == 422
+
+    def test_upload_rejects_stem_not_in_model(self, client: TestClient, sample_wav: Path):
+        resp = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("song.wav", sample_wav.read_bytes(), "audio/wav")},
+            data={"model": "htdemucs", "stems": "../escape"},
+        )
+        assert resp.status_code == 422
+
+    def test_upload_completes_and_stems_available(self, client: TestClient, sample_wav: Path):
         with open(sample_wav, "rb") as f:
             resp = client.post(
                 "/api/v1/jobs/upload",
@@ -75,6 +100,7 @@ class TestUpload:
 # URL endpoint
 # ---------------------------------------------------------------------------
 
+
 class TestURLSubmit:
     """POST /api/v1/jobs/url"""
 
@@ -86,10 +112,18 @@ class TestURLSubmit:
         assert resp.status_code == 202
         assert resp.json()["status"] == "QUEUED"
 
+    def test_url_rejects_non_http_scheme(self, client: TestClient):
+        resp = client.post(
+            "/api/v1/jobs/url",
+            json={"url": "file:///etc/passwd"},
+        )
+        assert resp.status_code == 422
+
 
 # ---------------------------------------------------------------------------
 # Status & listing
 # ---------------------------------------------------------------------------
+
 
 class TestJobStatus:
     """GET /api/v1/jobs and GET /api/v1/jobs/{job_id}"""
@@ -113,6 +147,7 @@ class TestJobStatus:
 # ---------------------------------------------------------------------------
 # Stem download
 # ---------------------------------------------------------------------------
+
 
 class TestStemDownload:
     """GET /api/v1/jobs/{job_id}/stems/{stem_name}"""
@@ -142,9 +177,7 @@ class TestStemDownload:
         resp = client.get(f"/api/v1/jobs/{job_id}/stems/nonexistent")
         assert resp.status_code == 404
 
-    def test_download_before_completion_returns_409(
-        self, client: TestClient, sample_wav: Path
-    ):
+    def test_download_before_completion_returns_409(self, client: TestClient, sample_wav: Path):
         """If we can catch the job before it's done, expect 409.
 
         This test is best-effort — the mock completes very quickly.
@@ -164,12 +197,13 @@ class TestStemDownload:
 # ZIP download
 # ---------------------------------------------------------------------------
 
+
 class TestZipDownload:
     """GET /api/v1/jobs/{job_id}/download-zip"""
 
     def test_zip_contains_all_stems(self, client: TestClient, sample_wav: Path):
-        import zipfile
         import io
+        import zipfile
 
         with open(sample_wav, "rb") as f:
             resp = client.post(
@@ -191,6 +225,7 @@ class TestZipDownload:
 # ---------------------------------------------------------------------------
 # Delete
 # ---------------------------------------------------------------------------
+
 
 class TestDeleteJob:
     """DELETE /api/v1/jobs/{job_id}"""

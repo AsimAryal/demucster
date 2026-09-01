@@ -7,10 +7,14 @@ reporting via the ``demucs.api.Separator`` callback mechanism.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+    from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,16 @@ SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
         "stems": ["drums", "bass", "other", "vocals"],
     },
 }
+
+
+def _demucs_progress_pct(info: dict[str, Any]) -> float:
+    """Convert a Demucs 4 callback payload to an approximate percentage."""
+    model_count = max(int(info.get("models", 1)), 1)
+    model_index = min(max(int(info.get("model_idx_in_bag", 0)), 0), model_count - 1)
+    audio_length = max(int(info.get("audio_length", 1)), 1)
+    segment_offset = min(max(int(info.get("segment_offset", 0)), 0), audio_length)
+    within_model = segment_offset / audio_length
+    return min(((model_index + within_model) / model_count) * 100.0, 99.0)
 
 
 class DemucsService:
@@ -157,9 +171,20 @@ class DemucsService:
 
         if model_name not in SUPPORTED_MODELS:
             raise ValueError(
-                f"Unsupported model '{model_name}'. "
-                f"Choose from: {', '.join(SUPPORTED_MODELS)}"
+                f"Unsupported model '{model_name}'. Choose from: {', '.join(SUPPORTED_MODELS)}"
             )
+        if output_format not in {"mp3", "wav"}:
+            raise ValueError(f"Unsupported output format: {output_format!r}")
+        if not 128 <= mp3_bitrate <= 320:
+            raise ValueError("MP3 bitrate must be between 128 and 320 kbps")
+
+        supported_stems = set(SUPPORTED_MODELS[model_name]["stems"])
+        if requested_stems is not None:
+            invalid_stems = sorted(set(requested_stems) - supported_stems)
+            if invalid_stems:
+                raise ValueError(f"Stems {invalid_stems} are unavailable for model '{model_name}'")
+            if not requested_stems:
+                raise ValueError("At least one stem must be requested")
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,11 +192,7 @@ class DemucsService:
         def _demucs_cb(info: dict[str, Any]) -> None:
             if progress_callback is None:
                 return
-            current = info.get("current", 0)
-            total = info.get("total", 1)
-            if total > 0:
-                pct = min((current / total) * 100.0, 99.0)  # 100% set after save
-                progress_callback(pct)
+            progress_callback(_demucs_progress_pct(info))
 
         logger.info(
             "Starting separation  model=%s  input=%s  format=%s",
@@ -194,21 +215,18 @@ class DemucsService:
         sample_rate: int = separator.samplerate
 
         # -- Run inference ---------------------------------------------------
-        _origin, separated = separator.separate_audio_file(str(input_path))
+        _origin, separated = separator.separate_audio_file(input_path)
 
         # -- Save stems ------------------------------------------------------
         available_stems = list(separated.keys())
-        stems_to_save = requested_stems or available_stems
+        stems_to_save = requested_stems if requested_stems is not None else available_stems
 
         stem_paths: dict[str, Path] = {}
         for stem_name in stems_to_save:
             if stem_name not in separated:
-                logger.warning(
-                    "Requested stem '%s' not in model output — skipping  (available: %s)",
-                    stem_name,
-                    available_stems,
+                raise RuntimeError(
+                    f"Model '{model_name}' did not produce requested stem '{stem_name}'"
                 )
-                continue
 
             stem_path = output_dir / f"{stem_name}.{output_format}"
             save_stem(
@@ -220,6 +238,9 @@ class DemucsService:
             )
             stem_paths[stem_name] = stem_path
             logger.debug("Saved stem: %s → %s", stem_name, stem_path)
+
+        if not stem_paths:
+            raise RuntimeError("Demucs produced no output stems")
 
         # -- Cleanup GPU memory ----------------------------------------------
         del separator, _origin, separated

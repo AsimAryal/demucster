@@ -12,6 +12,7 @@
 
 services:
   demucster:
+    platform: linux/arm64
     build:
       context: .
       dockerfile: Dockerfile
@@ -20,10 +21,11 @@ services:
       - "8000:8000"
     volumes:
       - demucster-data:/data
-      # Optional: mount a local model cache to avoid re-downloading
-      # - ~/.cache/torch:/home/demucster/.cache/torch
+      - demucster-models:/home/demucster/.cache/torch
     environment:
       - DEFAULT_MODEL=htdemucs_ft
+      - DEVICE=cuda
+      - REQUIRE_CUDA=true
       - MAX_CONCURRENT_JOBS=2
       - RETENTION_HOURS=24
       - OUTPUT_FORMAT=mp3
@@ -39,12 +41,21 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          data=json.load(urllib.request.urlopen("http://localhost:8000/api/v1/health", timeout=5));
+          assert data["status"] == "healthy" and data["cuda_available"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s  # Model warmup can take a while
+      start_period: 300s  # Initial model download and warmup can take several minutes
 
 volumes:
   demucster-data:
+    driver: local
+  demucster-models:
     driver: local
