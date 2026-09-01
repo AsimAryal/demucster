@@ -78,11 +78,14 @@ def get_gpu_info() -> dict[str, Any]:
 
     idx = 0
     props = torch.cuda.get_device_properties(idx)
+    total_memory = getattr(props, "total_memory", None)
+    if total_memory is None:
+        total_memory = props.total_mem
     return {
         "cuda_available": True,
         "device_name": props.name,
         "compute_capability": torch.cuda.get_device_capability(idx),
         "vram_allocated_mb": round(torch.cuda.memory_allocated(idx) / (1024**2), 1),
         "vram_reserved_mb": round(torch.cuda.memory_reserved(idx) / (1024**2), 1),
-        "vram_total_mb": round(props.total_mem / (1024**2), 1),
+        "vram_total_mb": round(total_memory / (1024**2), 1),
     }

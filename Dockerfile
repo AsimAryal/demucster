@@ -71,6 +71,7 @@ ENV DEFAULT_MODEL=htdemucs_ft
 ENV DEVICE=cuda
 ENV UPLOAD_DIR=/data/uploads
 ENV OUTPUT_DIR=/data/outputs
+ENV TORCH_HOME=/data/model-cache
 ENV MAX_CONCURRENT_JOBS=2
 ENV RETENTION_HOURS=24
 ENV LOG_LEVEL=INFO
@@ -79,7 +80,7 @@ ENV REQUIRE_CUDA=true
 
 # --- Non-root user -----------------------------------------------------------
 RUN useradd --create-home --shell /bin/bash demucster \
-    && mkdir -p /data/uploads /data/outputs \
+    && mkdir -p /data/uploads /data/outputs /data/model-cache \
     && chown -R demucster:demucster /data /app
 
 USER demucster

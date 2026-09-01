@@ -21,7 +21,10 @@ services:
       - "8000:8000"
     volumes:
       - demucster-data:/data
-      - demucster-models:/home/demucster/.cache/torch
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
     environment:
       - DEFAULT_MODEL=htdemucs_ft
       - DEVICE=cuda
@@ -56,6 +59,4 @@ services:
 
 volumes:
   demucster-data:
-    driver: local
-  demucster-models:
     driver: local
