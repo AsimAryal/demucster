@@ -1,7 +1,7 @@
 """Audio format validation, normalisation, and encoding utilities.
 
-Stems are saved as WAV via ``torchaudio`` or as high-quality MP3 via
-``ffmpeg`` (must be on ``$PATH``).
+Stems are saved as WAV via ``soundfile`` or as high-quality MP3 via ``ffmpeg``
+(must be on ``$PATH``).
 """
 
 from __future__ import annotations
@@ -108,8 +108,7 @@ def save_stem(
         soundfile.write(str(output_path), audio, sample_rate, format="WAV")
 
     elif output_format == "mp3":
-        # torchaudio's MP3 backend is limited; we shell out to ffmpeg for
-        # reliable high-bitrate encoding.
+        # Shell out to ffmpeg for reliable high-bitrate MP3 encoding.
         tmp_wav = output_path.with_suffix(".tmp.wav")
         try:
             soundfile.write(str(tmp_wav), audio, sample_rate, format="WAV")

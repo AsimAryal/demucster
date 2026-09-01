@@ -50,7 +50,7 @@ src/demucster/
 ### Demucs Integration
 - New `demucs.api.Separator` per job (thread-safe, avoids callback conflicts)
 - Model weights cached by demucs internally — no double-loading
-- Stems saved via `torchaudio.save` (WAV) or `ffmpeg` subprocess (MP3)
+- Stems saved via `soundfile.write` (WAV) or `ffmpeg` subprocess (MP3)
 
 ## Common Commands
 
@@ -71,7 +71,7 @@ docker compose up --build
 
 ## Test Strategy
 
-- All tests mock `DemucsService.separate`, `torch.cuda`, and `torchaudio.info`
+- Tests mock `DemucsService.separate` and `torch.cuda`; audio validation uses soundfile
 - `TestClient` (sync) from FastAPI handles lifespan
 - `conftest.py` patches env vars, clears `get_settings` cache
 - Worker tests use `pytest-asyncio` with real `asyncio.Queue`

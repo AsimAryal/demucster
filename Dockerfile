@@ -44,16 +44,14 @@ COPY pyproject.toml requirements-container.txt README.md .python-version ./
 # Copy source tree
 COPY src/ src/
 
-# Isolate application packages while inheriting NGC's system torch/torchaudio.
-# The no-deps export cannot resolve or replace the NVIDIA framework packages.
+# Isolate application packages while inheriting NGC's system PyTorch.
+# The no-deps export cannot resolve or replace NVIDIA's framework package.
 RUN python -m venv --system-site-packages /opt/demucster \
     && base_torch="$(/opt/demucster/bin/python -c 'import torch; print(torch.__version__)')" \
-    && base_torchaudio="$(/opt/demucster/bin/python -c 'import torchaudio; print(torchaudio.__version__)')" \
     && uv pip install --python /opt/demucster/bin/python --no-cache --no-deps --require-hashes \
         -r requirements-container.txt \
     && uv pip install --python /opt/demucster/bin/python --no-cache --no-deps -e . \
-    && test "$(/opt/demucster/bin/python -c 'import torch; print(torch.__version__)')" = "${base_torch}" \
-    && test "$(/opt/demucster/bin/python -c 'import torchaudio; print(torchaudio.__version__)')" = "${base_torchaudio}"
+    && test "$(/opt/demucster/bin/python -c 'import torch; print(torch.__version__)')" = "${base_torch}"
 
 # --- Environment variables --------------------------------------------------
 # GB10 Blackwell allocator tuning

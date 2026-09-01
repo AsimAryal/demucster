@@ -44,7 +44,7 @@ Demucster is a GPU-accelerated audio stem separation microservice (FastAPI + PyT
 
 ## Testing
 
-- All tests mock Demucs, torch.cuda, and torchaudio — no GPU needed.
+- Tests mock Demucs and torch.cuda; audio validation uses soundfile — no GPU needed.
 - Clear `get_settings.cache_clear()` in test fixtures.
 - Use `TestClient` for API tests, `pytest-asyncio` for queue tests.
 

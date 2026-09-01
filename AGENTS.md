@@ -33,7 +33,7 @@
 
 ### Dependencies
 - Use `uv sync` to install, `uv run` to execute.
-- PyTorch and torchaudio are resolved from the CUDA 12.8 index (configured in `pyproject.toml`).
+- Local PyTorch is resolved from the CUDA 12.8 index; Docker preserves NGC's PyTorch.
 - Heavy dependencies (`demucs`, `yt_dlp`) are **lazy-imported** inside functions to avoid import-time crashes when the library isn't installed.
 
 ### GPU / Blackwell
@@ -112,7 +112,7 @@ docker compose up --build
 
 ## Testing Rules
 
-- **Never require a GPU** — all tests mock `DemucsService.separate`, `torch.cuda.*`, and `torchaudio.info`.
+- **Never require a GPU** — tests mock `DemucsService.separate` and `torch.cuda.*`.
 - **TestClient** from FastAPI handles lifespan (startup/shutdown).
 - **`conftest.py`** patches env vars and clears `get_settings.cache_clear()` to isolate tests.
 - **Worker tests** use real `asyncio.Queue` with fake `process_fn`.
