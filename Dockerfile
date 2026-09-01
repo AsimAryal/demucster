@@ -23,14 +23,19 @@ LABEL description="GPU-accelerated Demucs stem separation microservice"
 # --- System dependencies ----------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
-        cargo \
         cmake \
         ffmpeg \
         libsndfile1 \
         libopus-dev \
         pkg-config \
-        rustc \
     && rm -rf /var/lib/apt/lists/*
+
+# sphn has no Linux ARM64 wheel and needs Cargo lockfile v4 support (Cargo >= 1.78).
+COPY --from=rust:1.85.1-slim-bookworm /usr/local/cargo /usr/local/cargo
+COPY --from=rust:1.85.1-slim-bookworm /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:${PATH}
 
 # --- Install uv package manager ---------------------------------------------
 COPY --from=ghcr.io/astral-sh/uv:0.8.3 /uv /uvx /usr/local/bin/
