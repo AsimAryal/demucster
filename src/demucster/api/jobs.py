@@ -277,6 +277,37 @@ async def download_stem(job_id: str, stem_name: str) -> FileResponse:
     )
 
 
+@router.get("/{job_id}/source")
+async def download_source(job_id: str) -> FileResponse:
+    """Stream the full source mix retained for a completed job."""
+    queue = _queue()
+    job = await queue.get_job(job_id)
+
+    if job is None:
+        raise HTTPException(404, f"Job not found: {job_id}")
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(409, f"Job is not completed (status: {job.status.value})")
+    if not job.input_path:
+        raise HTTPException(404, "No source audio is available for this job")
+
+    source_path = Path(job.input_path)
+    if not source_path.exists():
+        raise HTTPException(410, "Source audio has been cleaned up — re-submit the job")
+
+    media_types = {
+        ".flac": "audio/flac",
+        ".m4a": "audio/mp4",
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg",
+        ".wav": "audio/wav",
+    }
+    return FileResponse(
+        path=source_path,
+        media_type=media_types.get(source_path.suffix.lower(), "application/octet-stream"),
+        filename=job.filename or source_path.name,
+    )
+
+
 @router.get("/{job_id}/download-zip")
 async def download_zip(job_id: str) -> FileResponse:
     """Bundle all stems into a ZIP archive and stream it to the client."""

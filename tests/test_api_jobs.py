@@ -194,6 +194,33 @@ class TestStemDownload:
 
 
 # ---------------------------------------------------------------------------
+# Source download
+# ---------------------------------------------------------------------------
+
+
+class TestSourceDownload:
+    """GET /api/v1/jobs/{job_id}/source"""
+
+    def test_download_source_after_completion(self, client: TestClient, sample_wav: Path):
+        with open(sample_wav, "rb") as source:
+            response = client.post(
+                "/api/v1/jobs/upload",
+                files={"file": ("song.wav", source, "audio/wav")},
+            )
+        job_id = response.json()["job_id"]
+        _wait_for_completion(client, job_id)
+
+        response = client.get(f"/api/v1/jobs/{job_id}/source")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "audio/wav"
+        assert response.content == sample_wav.read_bytes()
+
+    def test_download_missing_source_returns_404(self, client: TestClient):
+        response = client.get("/api/v1/jobs/unknown/source")
+        assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # ZIP download
 # ---------------------------------------------------------------------------
 

@@ -120,6 +120,7 @@ the queue and job registry are intentionally in-process.
 | `GET` | `/api/v1/jobs` | List all jobs (filter by status, paginate) |
 | `GET` | `/api/v1/jobs/{job_id}` | Get job status, progress, and metadata |
 | `GET` | `/api/v1/jobs/{job_id}/stems/{stem_name}` | Download individual stem |
+| `GET` | `/api/v1/jobs/{job_id}/source` | Download the retained full source mix |
 | `GET` | `/api/v1/jobs/{job_id}/download-zip` | Download all stems as ZIP |
 | `DELETE` | `/api/v1/jobs/{job_id}` | Delete job and its files |
 
