@@ -55,6 +55,14 @@ class SeparationOptions(BaseModel):
         default=None,
         description="Specific stems to extract (e.g. ['vocals', 'drums']). None = all.",
     )
+    exclude_stems: list[str] | None = Field(
+        default=None,
+        description=(
+            "Stems to exclude — produces a mix of all other stems for each excluded "
+            "stem (e.g. ['drums'] → a drumless track named 'no_drums'). "
+            "Can be combined with 'stems' to get both individual stems and stemless mixes."
+        ),
+    )
 
     @field_validator("model")
     @classmethod
@@ -67,31 +75,41 @@ class SeparationOptions(BaseModel):
             raise ValueError(f"Unsupported model '{value}'")
         return value
 
-    @field_validator("stems")
+    @field_validator("stems", "exclude_stems")
     @classmethod
     def _validate_stem_names(cls, value: list[str] | None) -> list[str] | None:
         if value is None:
             return None
         cleaned = list(dict.fromkeys(stem.strip().lower() for stem in value if stem.strip()))
         if not cleaned:
-            raise ValueError("At least one stem must be requested")
+            raise ValueError("At least one stem must be specified")
         if any(not stem.isidentifier() for stem in cleaned):
             raise ValueError("Stem names may contain only letters, numbers, and underscores")
         return cleaned
 
     @model_validator(mode="after")
     def _validate_stems_for_model(self) -> SeparationOptions:
-        if self.model is None or self.stems is None:
+        if self.model is None:
             return self
         from demucster.services.separator import SUPPORTED_MODELS
 
         available = set(SUPPORTED_MODELS[self.model]["stems"])
-        invalid = sorted(set(self.stems) - available)
-        if invalid:
-            raise ValueError(
-                f"Stems {invalid} are unavailable for model '{self.model}'; "
-                f"choose from {sorted(available)}"
-            )
+
+        if self.stems is not None:
+            invalid = sorted(set(self.stems) - available)
+            if invalid:
+                raise ValueError(
+                    f"Stems {invalid} are unavailable for model '{self.model}'; "
+                    f"choose from {sorted(available)}"
+                )
+
+        if self.exclude_stems is not None:
+            invalid = sorted(set(self.exclude_stems) - available)
+            if invalid:
+                raise ValueError(
+                    f"Exclude stems {invalid} are unavailable for model '{self.model}'; "
+                    f"choose from {sorted(available)}"
+                )
         return self
 
 
@@ -122,10 +140,17 @@ class JobResponse(BaseModel):
     filename: str | None = None
     stems: dict[str, str] | None = Field(
         default=None,
-        description="Mapping of stem name → download URL path (available after COMPLETED).",
+        description=(
+            "Mapping of stem name → download URL path (available after COMPLETED). "
+            "Stemless mixes use 'no_' prefix (e.g. 'no_drums')."
+        ),
     )
     model: str
     output_format: str
+    exclude_stems: list[str] | None = Field(
+        default=None,
+        description="Stems that were excluded to produce stemless mixes.",
+    )
 
 
 class HealthResponse(BaseModel):

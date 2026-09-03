@@ -131,6 +131,7 @@ class DemucsService:
         mp3_bitrate: int = 320,
         progress_callback: Callable[[float], None] | None = None,
         requested_stems: list[str] | None = None,
+        exclude_stems: list[str] | None = None,
     ) -> dict[str, Path]:
         """Run Demucs separation and save stems to disk.
 
@@ -152,11 +153,16 @@ class DemucsService:
         requested_stems:
             Subset of stem names to save.  ``None`` saves all stems from the
             model.
+        exclude_stems:
+            Stems to exclude — for each excluded stem, a mix of all *other*
+            stems is saved as ``no_{stem_name}``.  Can be used alongside
+            ``requested_stems``.
 
         Returns
         -------
         dict[str, Path]
-            Mapping ``stem_name → output_file_path``.
+            Mapping ``stem_name → output_file_path``.  Stemless mixes use
+            the ``no_`` prefix (e.g. ``no_drums``).
 
         Raises
         ------
@@ -186,6 +192,13 @@ class DemucsService:
             if not requested_stems:
                 raise ValueError("At least one stem must be requested")
 
+        if exclude_stems is not None:
+            invalid_exclude = sorted(set(exclude_stems) - supported_stems)
+            if invalid_exclude:
+                raise ValueError(
+                    f"Exclude stems {invalid_exclude} are unavailable for model '{model_name}'"
+                )
+
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # -- Demucs progress callback ----------------------------------------
@@ -195,10 +208,11 @@ class DemucsService:
             progress_callback(_demucs_progress_pct(info))
 
         logger.info(
-            "Starting separation  model=%s  input=%s  format=%s",
+            "Starting separation  model=%s  input=%s  format=%s  exclude=%s",
             model_name,
             input_path.name,
             output_format,
+            exclude_stems,
         )
 
         # -- Create per-job Separator ----------------------------------------
@@ -217,7 +231,7 @@ class DemucsService:
         # -- Run inference ---------------------------------------------------
         _origin, separated = separator.separate_audio_file(input_path)
 
-        # -- Save stems ------------------------------------------------------
+        # -- Save individual stems -------------------------------------------
         available_stems = list(separated.keys())
         stems_to_save = requested_stems if requested_stems is not None else available_stems
 
@@ -238,6 +252,30 @@ class DemucsService:
             )
             stem_paths[stem_name] = stem_path
             logger.debug("Saved stem: %s → %s", stem_name, stem_path)
+
+        # -- Save stemless (minus-one) mixes ---------------------------------
+        if exclude_stems:
+            for excluded in exclude_stems:
+                remaining = [tensor for name, tensor in separated.items() if name != excluded]
+                if not remaining:
+                    logger.warning("Skipping exclude '%s' — no remaining stems to mix", excluded)
+                    continue
+
+                mix_tensor = remaining[0]
+                for tensor in remaining[1:]:
+                    mix_tensor = mix_tensor + tensor
+
+                mix_name = f"no_{excluded}"
+                mix_path = output_dir / f"{mix_name}.{output_format}"
+                save_stem(
+                    tensor=mix_tensor,
+                    sample_rate=sample_rate,
+                    output_path=mix_path,
+                    output_format=output_format,
+                    mp3_bitrate=mp3_bitrate,
+                )
+                stem_paths[mix_name] = mix_path
+                logger.debug("Saved stemless mix: %s → %s", mix_name, mix_path)
 
         if not stem_paths:
             raise RuntimeError("Demucs produced no output stems")

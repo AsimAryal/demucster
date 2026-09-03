@@ -58,6 +58,7 @@ class JobRecord(BaseModel):
     output_format: str = "mp3"
     mp3_bitrate: int = 320
     requested_stems: list[str] | None = None
+    exclude_stems: list[str] | None = None
 
     # URL download metadata
     source_url: str | None = None

@@ -49,6 +49,7 @@ def _resolve_options(
     output_format: str | None,
     mp3_bitrate: int | None,
     stems: list[str] | None,
+    exclude_stems: list[str] | None = None,
 ) -> SeparationOptions:
     """Apply configured defaults and validate a complete option set."""
     settings = get_settings()
@@ -58,6 +59,7 @@ def _resolve_options(
             output_format=output_format or settings.output_format,
             mp3_bitrate=mp3_bitrate if mp3_bitrate is not None else settings.mp3_bitrate,
             stems=stems,
+            exclude_stems=exclude_stems,
         )
     except ValidationError as exc:
         raise HTTPException(
@@ -88,6 +90,7 @@ def _job_to_response(job: JobRecord) -> JobResponse:
         stems=stems,
         model=job.model,
         output_format=job.output_format,
+        exclude_stems=job.exclude_stems,
     )
 
 
@@ -105,6 +108,15 @@ async def upload_file(
     stems: Annotated[
         str | None,
         Form(description="Comma-separated stem names to extract (e.g. 'vocals,drums')"),
+    ] = None,
+    exclude_stems: Annotated[
+        str | None,
+        Form(
+            description=(
+                "Comma-separated stem names to exclude — produces stemless mixes "
+                "(e.g. 'drums' → a drumless track named 'no_drums')"
+            ),
+        ),
     ] = None,
 ) -> JobResponse:
     """Upload an audio file for stem separation.
@@ -133,11 +145,13 @@ async def upload_file(
         )
 
     parsed_stems = [stem.strip() for stem in stems.split(",")] if stems else None
+    parsed_exclude = [stem.strip() for stem in exclude_stems.split(",")] if exclude_stems else None
     options = _resolve_options(
         model=model,
         output_format=output_format,
         mp3_bitrate=mp3_bitrate,
         stems=parsed_stems,
+        exclude_stems=parsed_exclude,
     )
     assert options.model is not None
     assert options.output_format is not None
@@ -150,6 +164,7 @@ async def upload_file(
         mp3_bitrate=options.mp3_bitrate,
         filename=safe_name,
         requested_stems=options.stems,
+        exclude_stems=options.exclude_stems,
     )
 
     # --- Stream upload to disk with a hard size limit ---
@@ -205,6 +220,7 @@ async def submit_url(request: URLRequest) -> JobResponse:
         output_format=request.options.output_format,
         mp3_bitrate=request.options.mp3_bitrate,
         stems=request.options.stems,
+        exclude_stems=request.options.exclude_stems,
     )
     assert options.model is not None
     assert options.output_format is not None
@@ -216,6 +232,7 @@ async def submit_url(request: URLRequest) -> JobResponse:
         mp3_bitrate=options.mp3_bitrate,
         source_url=str(request.url),
         requested_stems=options.stems,
+        exclude_stems=options.exclude_stems,
     )
     job.output_dir = str(Path(settings.output_dir) / job.job_id)
 

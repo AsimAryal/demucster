@@ -86,6 +86,7 @@ def _process_job(
         mp3_bitrate=job.mp3_bitrate,
         progress_callback=progress_callback,
         requested_stems=job.requested_stems,
+        exclude_stems=job.exclude_stems,
     )
 
 
