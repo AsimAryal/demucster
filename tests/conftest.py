@@ -80,6 +80,7 @@ def _mock_demucs_separator():
         mp3_bitrate: int = 320,
         progress_callback: Any = None,
         requested_stems: list[str] | None = None,
+        exclude_stems: list[str] | None = None,
     ) -> dict[str, Path]:
         output_dir.mkdir(parents=True, exist_ok=True)
         stems = requested_stems or ["vocals", "drums", "bass", "other"]
@@ -89,6 +90,15 @@ def _mock_demucs_separator():
             # Write a tiny valid-ish file (tests only check existence)
             p.write_bytes(b"\xff\xfb\x90\x00" * 25)  # 100 bytes
             result[stem] = p
+
+        # Generate stemless (minus-one) mixes
+        if exclude_stems:
+            for excluded in exclude_stems:
+                mix_name = f"no_{excluded}"
+                p = output_dir / f"{mix_name}.{output_format}"
+                p.write_bytes(b"\xff\xfb\x90\x00" * 25)  # 100 bytes
+                result[mix_name] = p
+
         if progress_callback:
             progress_callback(50.0)
             progress_callback(100.0)

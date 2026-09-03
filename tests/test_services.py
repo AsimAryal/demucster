@@ -243,3 +243,61 @@ def test_demucs_progress_uses_real_callback_fields() -> None:
         }
     )
     assert progress == pytest.approx(37.5)
+
+
+# =====================================================================
+# Exclude stems validation (SeparationOptions)
+# =====================================================================
+
+
+class TestExcludeStemsValidation:
+    """``SeparationOptions.exclude_stems`` — schema-level validation."""
+
+    def test_valid_exclude_stems(self) -> None:
+        from demucster.models.schemas import SeparationOptions
+
+        opts = SeparationOptions(model="htdemucs_ft", exclude_stems=["drums", "vocals"])
+        assert opts.exclude_stems == ["drums", "vocals"]
+
+    def test_exclude_stems_normalised_to_lowercase(self) -> None:
+        from demucster.models.schemas import SeparationOptions
+
+        opts = SeparationOptions(model="htdemucs_ft", exclude_stems=["DRUMS", " Vocals "])
+        assert opts.exclude_stems == ["drums", "vocals"]
+
+    def test_exclude_stems_invalid_for_model(self) -> None:
+        from demucster.models.schemas import SeparationOptions
+
+        with pytest.raises(ValueError, match=r"Exclude stems.*guitar.*unavailable"):
+            SeparationOptions(model="htdemucs_ft", exclude_stems=["guitar"])
+
+    def test_exclude_stems_valid_for_6s_model(self) -> None:
+        from demucster.models.schemas import SeparationOptions
+
+        opts = SeparationOptions(model="htdemucs_6s", exclude_stems=["guitar", "piano"])
+        assert opts.exclude_stems == ["guitar", "piano"]
+
+    def test_exclude_stems_deduplication(self) -> None:
+        from demucster.models.schemas import SeparationOptions
+
+        opts = SeparationOptions(model="htdemucs_ft", exclude_stems=["drums", "drums", "bass"])
+        assert opts.exclude_stems == ["drums", "bass"]
+
+    def test_exclude_stems_with_stems_both_validated(self) -> None:
+        from demucster.models.schemas import SeparationOptions
+
+        opts = SeparationOptions(model="htdemucs_ft", stems=["vocals"], exclude_stems=["drums"])
+        assert opts.stems == ["vocals"]
+        assert opts.exclude_stems == ["drums"]
+
+    def test_exclude_stems_empty_list_rejected(self) -> None:
+        from demucster.models.schemas import SeparationOptions
+
+        with pytest.raises(ValueError, match="At least one stem must be specified"):
+            SeparationOptions(model="htdemucs_ft", exclude_stems=[""])
+
+    def test_exclude_stems_none_is_allowed(self) -> None:
+        from demucster.models.schemas import SeparationOptions
+
+        opts = SeparationOptions(model="htdemucs_ft", exclude_stems=None)
+        assert opts.exclude_stems is None

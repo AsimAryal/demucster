@@ -97,6 +97,123 @@ class TestUpload:
 
 
 # ---------------------------------------------------------------------------
+# Stemless (exclude_stems) upload tests
+# ---------------------------------------------------------------------------
+
+
+class TestExcludeStems:
+    """POST /api/v1/jobs/upload with exclude_stems."""
+
+    def test_exclude_drums_produces_drumless_track(self, client: TestClient, sample_wav: Path):
+        with open(sample_wav, "rb") as f:
+            resp = client.post(
+                "/api/v1/jobs/upload",
+                files={"file": ("song.wav", f, "audio/wav")},
+                data={"exclude_stems": "drums"},
+            )
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["exclude_stems"] == ["drums"]
+
+        job_id = body["job_id"]
+        data = _wait_for_completion(client, job_id)
+        assert data["status"] == "COMPLETED"
+        assert "no_drums" in data["stems"]
+
+        # Stemless mix should be downloadable
+        resp = client.get(f"/api/v1/jobs/{job_id}/stems/no_drums")
+        assert resp.status_code == 200
+        assert len(resp.content) > 0
+
+    def test_exclude_with_stems_produces_both(self, client: TestClient, sample_wav: Path):
+        """Request specific stems AND stemless mixes in the same job."""
+        with open(sample_wav, "rb") as f:
+            resp = client.post(
+                "/api/v1/jobs/upload",
+                files={"file": ("song.wav", f, "audio/wav")},
+                data={"stems": "vocals", "exclude_stems": "drums"},
+            )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        data = _wait_for_completion(client, job_id)
+
+        assert data["status"] == "COMPLETED"
+        assert "vocals" in data["stems"]
+        assert "no_drums" in data["stems"]
+        # Should NOT have unrequested individual stems
+        assert "drums" not in data["stems"]
+        assert "bass" not in data["stems"]
+
+    def test_exclude_multiple_stems(self, client: TestClient, sample_wav: Path):
+        with open(sample_wav, "rb") as f:
+            resp = client.post(
+                "/api/v1/jobs/upload",
+                files={"file": ("song.wav", f, "audio/wav")},
+                data={"exclude_stems": "drums,vocals"},
+            )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        data = _wait_for_completion(client, job_id)
+
+        assert data["status"] == "COMPLETED"
+        assert "no_drums" in data["stems"]
+        assert "no_vocals" in data["stems"]
+
+    def test_exclude_invalid_stem_returns_422(self, client: TestClient, sample_wav: Path):
+        resp = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("song.wav", sample_wav.read_bytes(), "audio/wav")},
+            data={"model": "htdemucs", "exclude_stems": "guitar"},
+        )
+        assert resp.status_code == 422
+
+    def test_exclude_stem_in_6s_model(self, client: TestClient, sample_wav: Path):
+        """htdemucs_6s supports guitar — exclude_stems=guitar should be accepted."""
+        with open(sample_wav, "rb") as f:
+            resp = client.post(
+                "/api/v1/jobs/upload",
+                files={"file": ("song.wav", f, "audio/wav")},
+                data={"model": "htdemucs_6s", "exclude_stems": "guitar"},
+            )
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["exclude_stems"] == ["guitar"]
+
+    def test_url_with_exclude_stems(self, client: TestClient):
+        resp = client.post(
+            "/api/v1/jobs/url",
+            json={
+                "url": "https://example.com/song.mp3",
+                "options": {"exclude_stems": ["drums", "vocals"]},
+            },
+        )
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["exclude_stems"] == ["drums", "vocals"]
+
+    def test_exclude_stems_in_zip(self, client: TestClient, sample_wav: Path):
+        """Stemless mixes should be included in the ZIP download."""
+        import io
+        import zipfile
+
+        with open(sample_wav, "rb") as f:
+            resp = client.post(
+                "/api/v1/jobs/upload",
+                files={"file": ("song.wav", f, "audio/wav")},
+                data={"exclude_stems": "drums"},
+            )
+        job_id = resp.json()["job_id"]
+        _wait_for_completion(client, job_id)
+
+        resp = client.get(f"/api/v1/jobs/{job_id}/download-zip")
+        assert resp.status_code == 200
+
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        names = zf.namelist()
+        assert any("no_drums" in name for name in names)
+
+
+# ---------------------------------------------------------------------------
 # URL endpoint
 # ---------------------------------------------------------------------------
 
