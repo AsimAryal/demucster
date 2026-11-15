@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import TYPE_CHECKING
 
+import torch
+
 from demucster.models.schemas import LyricsWord
+from demucster.services.lyrics import _ensure_torchaudio_compat
 from demucster.services.lyrics_formats import (
     _format_ass_timestamp,
     _format_lrc_timestamp,
@@ -20,6 +24,8 @@ from demucster.services.lyrics_formats import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
 
 def test_lrc_timestamp_carry_rounding() -> None:
@@ -86,3 +92,37 @@ def test_formatters_and_artifact_writer(tmp_path: Path) -> None:
     parsed = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert parsed["summary"]["word_count"] == 2
     assert parsed["summary"]["llm_model"] == "qwen3:27b"
+
+
+def test_torchaudio_compat_shim_allows_stable_whisper_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "torchaudio", None)
+    monkeypatch.delitem(sys.modules, "torchaudio.functional", raising=False)
+    for name in list(sys.modules):
+        if name == "stable_whisper" or name.startswith("stable_whisper."):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+
+    _ensure_torchaudio_compat()
+
+    import stable_whisper
+    import torchaudio
+
+    assert hasattr(stable_whisper, "load_model")
+    wave = torch.randn(1, 1600)
+    resampled = torchaudio.functional.resample(wave, 16000, 8000)
+    assert resampled.shape == (1, 800)
+
+    filtered = torchaudio.functional.highpass_biquad(
+        torchaudio.functional.lowpass_biquad(wave, 16000, 5000),
+        16000,
+        200,
+    )
+    assert filtered.shape == wave.shape
+
+    wav_path = tmp_path / "shim.wav"
+    torchaudio.save(wav_path, wave, 16000)
+    loaded, sr = torchaudio.load(wav_path)
+    assert sr == 16000
+    assert loaded.shape == wave.shape

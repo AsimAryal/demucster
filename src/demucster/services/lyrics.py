@@ -8,7 +8,10 @@ optionally refines karaoke line breaks via Ollama, and writes ``lyrics.json``,
 from __future__ import annotations
 
 import logging
+import sys
 import threading
+import types
+from importlib.machinery import ModuleSpec
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -35,6 +38,90 @@ SUPPORTED_LYRICS_MODELS: dict[str, dict[str, Any]] = {
         "description": "Whisper medium — lighter footprint for faster turnaround",
     },
 }
+
+
+def _ensure_torchaudio_compat() -> None:
+    """Register a lightweight ``torchaudio`` shim when absent (e.g. NGC containers).
+
+    NVIDIA NGC PyTorch images omit ``torchaudio``, yet ``stable_whisper`` imports
+    it at module load time for ``functional.resample``, biquad filters, and
+    ``save``/``load``. Implementing those primitives with ``julius`` and
+    ``soundfile`` preserves NGC's Blackwell PyTorch stack untouched.
+    """
+    existing = sys.modules.get("torchaudio")
+    if existing is not None:
+        return
+    try:
+        import torchaudio  # noqa: F401
+
+        return
+    except ModuleNotFoundError:
+        pass
+
+    import julius
+    import soundfile as sf
+
+    def _resample(
+        waveform: torch.Tensor,
+        orig_freq: int,
+        new_freq: int,
+        **_kwargs: Any,
+    ) -> torch.Tensor:
+        if int(orig_freq) == int(new_freq):
+            return waveform
+        return julius.resample_frac(waveform, int(orig_freq), int(new_freq))
+
+    def _clamp_cutoff(cutoff_freq: float, sample_rate: int) -> float:
+        return max(1e-4, min(0.499, float(cutoff_freq) / float(sample_rate)))
+
+    def _highpass_biquad(
+        waveform: torch.Tensor,
+        sample_rate: int,
+        cutoff_freq: float,
+        **_kwargs: Any,
+    ) -> torch.Tensor:
+        return julius.highpass_filter(waveform, _clamp_cutoff(cutoff_freq, sample_rate))
+
+    def _lowpass_biquad(
+        waveform: torch.Tensor,
+        sample_rate: int,
+        cutoff_freq: float,
+        **_kwargs: Any,
+    ) -> torch.Tensor:
+        return julius.lowpass_filter(waveform, _clamp_cutoff(cutoff_freq, sample_rate))
+
+    def _save(
+        uri: Any,
+        src: torch.Tensor,
+        sample_rate: int,
+        **_kwargs: Any,
+    ) -> None:
+        arr = src.detach().cpu().numpy()
+        if arr.ndim == 2:
+            arr = arr.T
+        sf.write(str(uri), arr, int(sample_rate))
+
+    def _load(uri: Any, **_kwargs: Any) -> tuple[torch.Tensor, int]:
+        data, sr = sf.read(str(uri), dtype="float32", always_2d=True)
+        return torch.from_numpy(data.T.copy()), int(sr)
+
+    functional_mod = types.ModuleType("torchaudio.functional")
+    functional_mod.__spec__ = ModuleSpec("torchaudio.functional", None)
+    functional_mod.resample = _resample  # type: ignore[attr-defined]
+    functional_mod.highpass_biquad = _highpass_biquad  # type: ignore[attr-defined]
+    functional_mod.lowpass_biquad = _lowpass_biquad  # type: ignore[attr-defined]
+
+    torchaudio_mod = types.ModuleType("torchaudio")
+    torchaudio_mod.__spec__ = ModuleSpec("torchaudio", None)
+    torchaudio_mod.__version__ = "2.0.0+demucster-shim"  # type: ignore[attr-defined]
+    torchaudio_mod.functional = functional_mod  # type: ignore[attr-defined]
+    torchaudio_mod.save = _save  # type: ignore[attr-defined]
+    torchaudio_mod.load = _load  # type: ignore[attr-defined]
+    torchaudio_mod.set_audio_backend = lambda _backend: None  # type: ignore[attr-defined]
+
+    sys.modules["torchaudio.functional"] = functional_mod
+    sys.modules["torchaudio"] = torchaudio_mod
+    logger.info("Registered julius/soundfile compatibility shim for missing torchaudio")
 
 
 def _words_from_result(result: Any) -> tuple[list[LyricsWord], str | None, float]:
@@ -104,6 +191,7 @@ class LyricsService:
             if cached is not None:
                 return cached
 
+            _ensure_torchaudio_compat()
             import stable_whisper  # lazy import — heavy dependency
 
             kwargs: dict[str, Any] = {"device": str(self._device)}
