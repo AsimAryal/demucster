@@ -19,6 +19,8 @@ services:
     container_name: demucster
     ports:
       - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - demucster-data:/data
     ipc: host
@@ -35,6 +37,11 @@ services:
       - MP3_BITRATE=320
       - LOG_LEVEL=INFO
       - PREWARM_MODEL=true
+      - LYRICS_ENABLED=true
+      - LYRICS_DEFAULT_MODEL=large-v3-turbo
+      - LYRICS_PREWARM_MODEL=false
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=qwen3:27b
     deploy:
       resources:
         reservations:

@@ -164,6 +164,10 @@ class HealthResponse(BaseModel):
     vram_total_mb: float | None = None
     active_jobs: int = 0
     queued_jobs: int = 0
+    lyrics_enabled: bool = False
+    lyrics_active_jobs: int = 0
+    lyrics_queued_jobs: int = 0
+    ollama_configured: bool = False
 
 
 class ModelInfo(BaseModel):
@@ -173,3 +177,126 @@ class ModelInfo(BaseModel):
     description: str
     stems: list[str]
     is_default: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Lyrics extraction schemas
+# ---------------------------------------------------------------------------
+
+
+class LyricsWord(BaseModel):
+    """Single word with start/end timestamps (seconds)."""
+
+    word: str
+    start: float = Field(ge=0.0)
+    end: float = Field(ge=0.0)
+    score: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class LyricsLine(BaseModel):
+    """Single karaoke display line composed of timed words."""
+
+    index: int = Field(ge=0)
+    start: float = Field(ge=0.0)
+    end: float = Field(ge=0.0)
+    text: str
+    words: list[LyricsWord] = Field(default_factory=list)
+
+
+class LyricsSummary(BaseModel):
+    """Summary metadata attached to a completed lyrics extraction job."""
+
+    language: str | None = None
+    line_count: int = Field(default=0, ge=0)
+    word_count: int = Field(default=0, ge=0)
+    duration_seconds: float = Field(default=0.0, ge=0.0)
+    llm_refined: bool = False
+    llm_model: str | None = None
+    aligned_with_reference: bool = False
+
+
+class LyricsDocument(BaseModel):
+    """Canonical structured karaoke lyrics document serialized to ``lyrics.json``."""
+
+    version: int = 1
+    title: str | None = None
+    model: str
+    summary: LyricsSummary
+    lines: list[LyricsLine] = Field(default_factory=list)
+
+
+class LyricsOptions(BaseModel):
+    """User-configurable options for a lyrics extraction job."""
+
+    model: str | None = Field(
+        default=None,
+        description="Whisper model name (e.g. large-v3-turbo, large-v3, medium).",
+    )
+    language: str | None = Field(
+        default=None,
+        max_length=16,
+        description="Optional ISO 639-1 language code (None = auto-detect).",
+    )
+    reference_lyrics: str | None = Field(
+        default=None,
+        max_length=50_000,
+        description="Optional known lyrics text to force-align against the vocals.",
+    )
+    title: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Optional song title for metadata headers and LLM context.",
+    )
+    use_llm_cleanup: bool = Field(
+        default=True,
+        description="Use configured Ollama LLM to group karaoke lines and clean text.",
+    )
+
+    @field_validator("model")
+    @classmethod
+    def _validate_lyrics_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from demucster.services.lyrics import SUPPORTED_LYRICS_MODELS
+
+        if value not in SUPPORTED_LYRICS_MODELS:
+            raise ValueError(f"Unsupported lyrics model '{value}'")
+        return value
+
+    @field_validator("language")
+    @classmethod
+    def _validate_language(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if not cleaned or cleaned == "auto":
+            return None
+        if not cleaned.isalpha() or not 2 <= len(cleaned) <= 8:
+            raise ValueError("Language must be an ISO code such as 'en' or 'es'")
+        return cleaned
+
+    @field_validator("reference_lyrics", "title")
+    @classmethod
+    def _strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
+class LyricsJobResponse(BaseModel):
+    """Public representation of a lyrics extraction job."""
+
+    job_id: str
+    status: JobStatus
+    progress_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+    error_message: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+    filename: str | None = None
+    model: str
+    artifacts: dict[str, str] | None = Field(
+        default=None,
+        description="Mapping of artifact kind ('json', 'lrc', 'ass', 'srt') → URL path.",
+    )
+    summary: LyricsSummary | None = None

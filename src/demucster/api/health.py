@@ -23,7 +23,7 @@ async def health_check() -> HealthResponse:
     Uses ``torch.cuda`` introspection (not pynvml) to avoid NVML
     misreporting on the DGX Spark's GB10 unified memory architecture.
     """
-    from demucster.main import job_queue
+    from demucster.main import job_queue, lyrics_queue
 
     settings = get_settings()
     gpu = get_gpu_info()
@@ -39,6 +39,10 @@ async def health_check() -> HealthResponse:
         vram_total_mb=gpu.get("vram_total_mb"),
         active_jobs=job_queue.active_count if job_queue else 0,
         queued_jobs=job_queue.queued_count if job_queue else 0,
+        lyrics_enabled=settings.lyrics_enabled,
+        lyrics_active_jobs=lyrics_queue.active_count if lyrics_queue else 0,
+        lyrics_queued_jobs=lyrics_queue.queued_count if lyrics_queue else 0,
+        ollama_configured=bool(settings.ollama_url),
     )
 
 

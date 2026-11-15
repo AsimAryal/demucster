@@ -76,6 +76,40 @@ class Settings(BaseSettings):
         description="Maximum duration (seconds) for yt-dlp downloads.",
     )
 
+    # --- Lyrics Extraction & Ollama ------------------------------------------
+    lyrics_enabled: bool = Field(
+        default=True,
+        description="Enable timestamped lyrics extraction endpoints and worker.",
+    )
+    lyrics_dir: str = Field(default="/data/lyrics")
+    whisper_cache_dir: str = Field(default="/data/model-cache/whisper")
+    lyrics_default_model: str = Field(
+        default="large-v3-turbo",
+        description="Default Whisper model for lyrics extraction.",
+    )
+    lyrics_max_concurrent_jobs: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum lyrics jobs running concurrently.",
+    )
+    lyrics_prewarm_model: bool = Field(
+        default=False,
+        description="Pre-load the default Whisper model on startup.",
+    )
+    ollama_url: str | None = Field(
+        default=None,
+        description="Optional Ollama base URL for LLM line refinement (e.g. http://host.docker.internal:11434).",
+    )
+    ollama_model: str = Field(
+        default="qwen3:27b",
+        description="Ollama model name for karaoke line segmentation and cleanup.",
+    )
+    ollama_timeout_seconds: float = Field(
+        default=120.0,
+        ge=5.0,
+        description="Request timeout (seconds) for Ollama refinement calls.",
+    )
+
     # --- Validators ----------------------------------------------------------
     @field_validator("default_model")
     @classmethod
@@ -93,6 +127,25 @@ class Settings(BaseSettings):
         if not re.fullmatch(r"(?:cpu|cuda(?::\d+)?)", value):
             raise ValueError("DEVICE must be 'cpu', 'cuda', or 'cuda:<index>'")
         return value
+
+    @field_validator("lyrics_default_model")
+    @classmethod
+    def _validate_lyrics_model(cls, v: str) -> str:
+        from demucster.services.lyrics import SUPPORTED_LYRICS_MODELS
+
+        if v not in SUPPORTED_LYRICS_MODELS:
+            raise ValueError(
+                f"Unsupported lyrics model '{v}'. Choose from: {', '.join(SUPPORTED_LYRICS_MODELS)}"
+            )
+        return v
+
+    @field_validator("ollama_url")
+    @classmethod
+    def _normalize_ollama_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().rstrip("/")
+        return cleaned or None
 
 
 @lru_cache(maxsize=1)

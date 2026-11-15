@@ -23,17 +23,23 @@ from demucster.core.config import get_settings
 from demucster.core.gpu import get_device
 from demucster.core.logging import setup_logging
 from demucster.services.cleanup import run_cleanup_loop
+from demucster.services.lyrics import LyricsService
 from demucster.services.separator import DemucsService
+from demucster.worker.lyrics_queue import LyricsJobRecord, LyricsQueue
 from demucster.worker.queue import JobQueue, JobRecord
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+
+    from demucster.models.schemas import LyricsSummary
 
 logger = logging.getLogger(__name__)
 
 # Module-level references so endpoint code can import them directly.
 job_queue: JobQueue | None = None
 demucs_service: DemucsService | None = None
+lyrics_queue: LyricsQueue | None = None
+lyrics_service: LyricsService | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +96,42 @@ def _process_job(
     )
 
 
+def _process_lyrics_job(
+    job: LyricsJobRecord,
+    progress_callback: Callable[[float], None],
+) -> tuple[dict[str, Path], LyricsSummary]:
+    """Execute one timestamped lyrics extraction job in the executor pool."""
+    assert lyrics_service is not None
+
+    if not job.input_path:
+        raise RuntimeError("Lyrics job has no input_path")
+
+    settings = get_settings()
+    input_path = Path(job.input_path)
+    output_dir = Path(job.output_dir) if job.output_dir else Path(settings.lyrics_dir) / job.job_id
+
+    if job.owns_input:
+        from demucster.services.audio import validate_audio_file
+
+        validate_audio_file(input_path)
+    elif not input_path.exists():
+        raise RuntimeError(f"Stem audio not found: {input_path}")
+
+    return lyrics_service.extract(
+        input_path=input_path,
+        output_dir=output_dir,
+        model_name=job.model,
+        language=job.language,
+        reference_lyrics=job.reference_lyrics,
+        title=job.title,
+        use_llm_cleanup=job.use_llm_cleanup,
+        ollama_url=settings.ollama_url,
+        ollama_model=settings.ollama_model,
+        ollama_timeout_seconds=settings.ollama_timeout_seconds,
+        progress_callback=progress_callback,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
@@ -98,7 +140,7 @@ def _process_job(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application startup and shutdown lifecycle."""
-    global job_queue, demucs_service
+    global job_queue, demucs_service, lyrics_queue, lyrics_service
 
     settings = get_settings()
     setup_logging(level=settings.log_level)
@@ -108,6 +150,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Create data directories
     Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.output_dir).mkdir(parents=True, exist_ok=True)
+    if settings.lyrics_enabled:
+        Path(settings.lyrics_dir).mkdir(parents=True, exist_ok=True)
 
     # GPU device
     device = get_device(preferred=settings.device, require_cuda=settings.require_cuda)
@@ -129,13 +173,49 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     job_queue = JobQueue(max_concurrent=settings.max_concurrent_jobs)
     await job_queue.start(process_fn=_process_job)
 
+    # Lyrics service & queue
+    if settings.lyrics_enabled:
+        lyrics_service = LyricsService(
+            device=device,
+            cache_dir=Path(settings.whisper_cache_dir),
+        )
+        if settings.lyrics_prewarm_model:
+            try:
+                lyrics_service.warmup(settings.lyrics_default_model)
+            except Exception:
+                logger.warning(
+                    "Lyrics model pre-warm failed — first lyrics job will incur cold-start",
+                    exc_info=True,
+                )
+        lyrics_queue = LyricsQueue(max_concurrent=settings.lyrics_max_concurrent_jobs)
+        await lyrics_queue.start(process_fn=_process_lyrics_job)
+    else:
+        lyrics_service = None
+        lyrics_queue = None
+
+    async def _protected_ids() -> set[str]:
+        ids = await job_queue.protected_job_ids()
+        if lyrics_queue is not None:
+            ids |= await lyrics_queue.protected_job_ids()
+        return ids
+
+    async def _cleanup_expired(retention_seconds: float) -> int:
+        removed = await job_queue.cleanup_expired(retention_seconds)
+        if lyrics_queue is not None:
+            removed += await lyrics_queue.cleanup_expired(retention_seconds)
+        return removed
+
+    cleanup_dirs = [Path(settings.upload_dir), Path(settings.output_dir)]
+    if settings.lyrics_enabled:
+        cleanup_dirs.append(Path(settings.lyrics_dir))
+
     # Cleanup loop
     cleanup_task = asyncio.create_task(
         run_cleanup_loop(
-            directories=[Path(settings.upload_dir), Path(settings.output_dir)],
+            directories=cleanup_dirs,
             retention_hours=settings.retention_hours,
-            protected_ids_provider=job_queue.protected_job_ids,
-            registry_cleanup=job_queue.cleanup_expired,
+            protected_ids_provider=_protected_ids,
+            registry_cleanup=_cleanup_expired,
         ),
         name="cleanup",
     )
@@ -149,6 +229,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cleanup_task.cancel()
     with suppress(asyncio.CancelledError):
         await cleanup_task
+
+    if lyrics_queue is not None:
+        await lyrics_queue.stop()
 
     if job_queue is not None:
         await job_queue.stop()

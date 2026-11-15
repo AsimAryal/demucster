@@ -44,8 +44,10 @@ def tmp_dirs(tmp_path: Path) -> tuple[Path, Path]:
     """Provide temporary upload and output directories."""
     upload = tmp_path / "uploads"
     output = tmp_path / "outputs"
+    lyrics = tmp_path / "lyrics"
     upload.mkdir()
     output.mkdir()
+    lyrics.mkdir()
     return upload, output
 
 
@@ -119,23 +121,82 @@ def _mock_demucs_warmup():
 
 
 @pytest.fixture()
+def _mock_lyrics_service():
+    """Replace ``LyricsService.extract`` with a fast mock writing sample artifacts."""
+    from demucster.models.schemas import LyricsWord
+    from demucster.services.lyrics_formats import (
+        build_lyrics_document,
+        group_words_into_lines,
+        write_lyrics_artifacts,
+    )
+
+    def _fake_extract(
+        self: Any,
+        *,
+        input_path: Path,
+        output_dir: Path,
+        model_name: str,
+        language: str | None = None,
+        reference_lyrics: str | None = None,
+        title: str | None = None,
+        use_llm_cleanup: bool = True,
+        ollama_url: str | None = None,
+        ollama_model: str = "qwen3:27b",
+        ollama_timeout_seconds: float = 120.0,
+        progress_callback: Any = None,
+    ) -> Any:
+        words = [
+            LyricsWord(word="Hello", start=0.2, end=0.6, score=0.95),
+            LyricsWord(word="karaoke", start=0.65, end=1.1, score=0.92),
+            LyricsWord(word="world", start=1.15, end=1.6, score=0.98),
+        ]
+        lines = group_words_into_lines(words)
+        doc = build_lyrics_document(
+            lines=lines,
+            model=model_name,
+            title=title or input_path.stem,
+            language=language or "en",
+            duration_seconds=1.6,
+            llm_refined=bool(use_llm_cleanup and ollama_url),
+            llm_model=ollama_model if (use_llm_cleanup and ollama_url) else None,
+            aligned_with_reference=bool(reference_lyrics),
+        )
+        artifacts = write_lyrics_artifacts(doc, output_dir)
+        if progress_callback:
+            progress_callback(50.0)
+            progress_callback(100.0)
+        return artifacts, doc.summary
+
+    with (
+        patch("demucster.services.lyrics.LyricsService.extract", _fake_extract),
+        patch("demucster.services.lyrics.LyricsService.warmup"),
+    ):
+        yield
+
+
+@pytest.fixture()
 def client(
     tmp_dirs: tuple[Path, Path],
+    tmp_path: Path,
     _mock_gpu: None,
     _mock_demucs_separator: None,
     _mock_demucs_warmup: None,
+    _mock_lyrics_service: None,
 ) -> TestClient:  # type: ignore[type-arg]
     """A ``TestClient`` wired to a fully-mocked Demucster app.
 
     Demucs and GPU calls are mocked so the suite needs no CUDA or model weights.
     """
     upload_dir, output_dir = tmp_dirs
+    lyrics_dir = tmp_path / "lyrics"
 
     with patch.dict(
         "os.environ",
         {
             "UPLOAD_DIR": str(upload_dir),
             "OUTPUT_DIR": str(output_dir),
+            "LYRICS_DIR": str(lyrics_dir),
+            "LYRICS_PREWARM_MODEL": "false",
             "PREWARM_MODEL": "true",
             "DEVICE": "cpu",
             "LOG_LEVEL": "WARNING",
