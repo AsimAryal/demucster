@@ -71,8 +71,14 @@ ENV DEFAULT_MODEL=htdemucs_ft
 ENV DEVICE=cuda
 ENV UPLOAD_DIR=/data/uploads
 ENV OUTPUT_DIR=/data/outputs
+ENV LYRICS_DIR=/data/lyrics
 ENV TORCH_HOME=/data/model-cache
+ENV WHISPER_CACHE_DIR=/data/model-cache/whisper
 ENV MAX_CONCURRENT_JOBS=2
+ENV LYRICS_ENABLED=true
+ENV LYRICS_DEFAULT_MODEL=large-v3-turbo
+ENV LYRICS_PREWARM_MODEL=false
+ENV OLLAMA_MODEL=qwen3:27b
 ENV RETENTION_HOURS=24
 ENV LOG_LEVEL=INFO
 ENV PREWARM_MODEL=true
@@ -80,7 +86,7 @@ ENV REQUIRE_CUDA=true
 
 # --- Non-root user -----------------------------------------------------------
 RUN useradd --create-home --shell /bin/bash demucster \
-    && mkdir -p /data/uploads /data/outputs /data/model-cache \
+    && mkdir -p /data/uploads /data/outputs /data/lyrics /data/model-cache/whisper \
     && chown -R demucster:demucster /data /app
 
 USER demucster
